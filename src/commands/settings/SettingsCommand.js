@@ -205,6 +205,45 @@ export class SettingsCommand extends BaseCommand {
     }
   }
 
+  /** Butler Assistant */
+  async showButlerSettings(chatId, userInfo) {
+    try {
+      const user = await User.findOne({ telegramId: userInfo.id.toString() });
+      const isEnabled = user?.settings?.butler?.enabled || false;
+      const isConnected = !!user?.googleAuth?.accessToken;
+  
+      const keyboard = this.createKeyboard([
+        [{
+          text: isEnabled ? '🔴 Disable Butler' : '🟢 Enable Butler',
+          callback_data: 'toggle_butler'
+        }],
+        [{
+          text: isConnected ? '🔄 Reconnect Google' : '🔗 Connect Google',
+          callback_data: 'connect_google'
+        }],
+        [{ text: '↩️ Back', callback_data: 'back_to_settings' }]
+      ]);
+  
+      await this.bot.sendMessage(
+        chatId,
+        '*Butler Assistant Settings* 🫅\n\n' +
+        `Status: ${isEnabled ? '✅ Enabled' : '❌ Disabled'}\n` +
+        `Google Account: ${isConnected ? '✅ Connected' : '❌ Not Connected'}\n\n` +
+        'Butler can:\n' +
+        '• Set reminders and calendar events\n' +
+        '• Monitor and send emails\n' +
+        '• Generate activity reports',
+        {
+          parse_mode: 'Markdown',
+          reply_markup: keyboard
+        }
+      );
+    } catch (error) {
+      await ErrorHandler.handle(error);
+    }
+  }
+
+
   /** Toggle Butler Assistant */
   async toggleButlerAssistant(chatId, userInfo) {
     try {

@@ -28,73 +28,38 @@ class OpenAIService {
     }
   }
 
-  async generateAIResponse(input, purpose, retryCount = 0) {
+  async generateAIResponse(messages, purpose = 'chat') {
     try {
       if (!this.isConnected) {
         await this.testConnection();
       }
 
-      const messages = Array.isArray(input) ? input : this.prepareTextMessages(input, purpose);
-      
+      // Ensure messages is an array
+      const messageArray = Array.isArray(messages) ? messages : [
+        {
+          role: 'system',
+          content: systemPrompts[purpose] || systemPrompts.general
+        },
+        {
+          role: 'user',
+          content: messages
+        }
+      ];
+
       const response = await this.openai.chat.completions.create({
-        model: this.getModel(purpose),
-        messages,
+        model: 'gpt-3.5-turbo',
+        messages: messageArray,
         max_tokens: 500,
-        temperature: this.getTemperature(purpose),
-        timeout: 30000 // 30 second timeout
+        temperature: 0.7,
+        presence_penalty: 0.6,
+        frequency_penalty: 0.5
       });
 
       return response.choices[0].message.content;
-
     } catch (error) {
-      const { shouldRetry, fallbackResponse } = await OpenAIErrorHandler.handleError(error, retryCount);
-      
-      if (shouldRetry) {
-        return this.generateAIResponse(input, purpose, retryCount + 1);
-      }
-
-      if (fallbackResponse) {
-        return fallbackResponse;
-      }
-
+      console.error('OpenAI Error:', error);
+      await ErrorHandler.handle(error);
       throw error;
-    }
-  }
-
-  prepareTextMessages(text, purpose) {
-    const messages = [{
-      role: 'system',
-      content: systemPrompts[purpose] || systemPrompts.general
-    }];
-
-    // Add user message
-    messages.push({
-      role: 'user',
-      content: text
-    });
-
-    return messages;
-  }
-
-  getModel(purpose) {
-    switch (purpose) {
-      case 'image':
-        return 'gpt-4-vision-preview';
-      case 'pdf':
-        return 'gpt-4';
-      default:
-        return 'gpt-3.5-turbo';
-    }
-  }
-
-  getTemperature(purpose) {
-    switch (purpose) {
-      case 'intent_classification':
-        return 0.3;
-      case 'trading':
-        return 0.5;
-      default:
-        return 0.7;
     }
   }
 

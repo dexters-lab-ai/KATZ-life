@@ -90,7 +90,23 @@ const UserSchema = new mongoose.Schema({
           max: 50
         }
       }
-    }
+    },
+    googleAuth: {
+      accessToken: String,
+      refreshToken: String,
+      expiryDate: Date
+    },
+    butler: {
+      enabled: {
+        type: Boolean,
+        default: false
+      },
+      monitors: [{
+        type: String,
+        query: String,
+        startTime: Date
+      }]
+    },
   },
   registeredAt: {
     type: Date,

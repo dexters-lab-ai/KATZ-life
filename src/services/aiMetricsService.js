@@ -1,6 +1,6 @@
 
-import { TRADING_INTENTS } from './ai/intents.js';
-import { matchIntent, formatIntentResponse } from './ai/intents.js';
+import { matchIntent, TRADING_INTENTS } from './ai/intents.js';
+import { formatIntentResponse } from './ai/formatters/ResponseFormatter.js';
 
 class AIMetricsService {
   
