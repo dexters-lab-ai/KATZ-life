@@ -2,8 +2,7 @@ import { EventEmitter } from 'events';
 import { ErrorHandler } from './errors/index.js';
 import { rateLimiter } from './rate-limiting/RateLimiter.js';
 import { circuitBreakers } from './circuit-breaker/index.js';
-import { matchIntent } from '../services/ai/intents.js';
-import { aiService } from '../services/ai/index.js';
+import { messageProcessor } from '../services/ai/processors/UnifiedMessageProcessor.js';
 import { contextManager } from '../services/ai/ContextManager.js';
 
 export class UnifiedMessageHandler extends EventEmitter {
@@ -54,11 +53,6 @@ export class UnifiedMessageHandler extends EventEmitter {
     try {
       if (!msg.text) return;
 
-      // Get conversation context
-      const context = await this.contextManager.getContext(msg.from.id);
-      const isReplyToBot = msg.reply_to_message?.from?.id === this.bot.id;
-      const isKatzMention = msg.text.toLowerCase().includes('katz');
-
       // Check for command matches first
       const command = this.commandRegistry.findCommand(msg.text);
       if (command) {
@@ -66,65 +60,79 @@ export class UnifiedMessageHandler extends EventEmitter {
         return;
       }
 
-      // Handle AI conversation if applicable
-      if (isReplyToBot || isKatzMention || context.length > 0) {
-        await this.handleAIResponse(msg, context);
-        return;
-      }
+      // Process message through unified processor
+      const result = await messageProcessor.processMessage(msg, msg.from.id);
 
-      // Check for intent matches
-      const intent = matchIntent(msg.text);
-      if (intent) {
-        await this.handleAIResponse(msg, context, intent);
-        return;
-      }
+      // Handle the response
+      await this.sendResponse(msg.chat.id, result);
 
-      // Handle state-based input
-      for (const cmd of this.commandRegistry.getCommands()) {
-        if (cmd.handleInput && await cmd.handleInput(msg)) {
-          return;
-        }
-      }
     } catch (error) {
       await ErrorHandler.handle(error, this.bot, msg.chat.id);
     }
   }
 
-  async handleAIResponse(msg, context, intent = null) {
-    let loadingMsg = null;
+  async sendResponse(chatId, result) {
     try {
-      loadingMsg = await this.bot.sendMessage(
-        msg.chat.id,
-        '🤖 Processing your request...'
-      );
-
-      const response = await aiService.processCommand(
-        msg.text,
-        intent,
-        msg.from.id,
-        context
-      );
-
-      // Only try to delete if we have a loading message
-      if (loadingMsg) {
-        try {
-          await this.bot.deleteMessage(msg.chat.id, loadingMsg.message_id);
-        } catch (deleteError) {
-          console.log('Non-critical error deleting loading message:', deleteError.message);
-        }
+      // Basic validation
+      if (!result) {
+        throw new Error('No response data received');
       }
-
-      // Send response with appropriate markup
-      return await this.bot.sendMessage(msg.chat.id, response.text, {
-        parse_mode: 'Markdown',
-        reply_markup: {
-          force_reply: true,
-          selective: true
-        }
+  
+      // Ensure result has text content
+      if (!result.text && !result.message) {
+        console.warn('⚠️ No text content in result:', result);
+        throw new Error('Response must contain text content');
+      }
+  
+      // Use text or message field
+      const content = result.text || result.message;
+  
+      // Add ASCII art header if result has a type
+      const header = result.type ? this.getAsciiHeader(result.type) : null;
+      const formattedText = header ? `${header}\n\n${content}` : content;
+  
+      // Send message with appropriate options
+      await this.bot.sendMessage(chatId, formattedText, {
+        parse_mode: result.parse_mode || 'Markdown',
+        reply_markup: result.reply_markup,
+        disable_web_page_preview: result.type !== 'search' // Enable previews only for search results
       });
+  
     } catch (error) {
-      await ErrorHandler.handle(error, this.bot, msg.chat.id);
+      console.error('Error sending response:', error);
+      await ErrorHandler.handle(error, this.bot, chatId);
     }
+  }
+  
+  getAsciiHeader(type) {
+    const headers = {
+      search: `
+  ╔════════════════════════════════════╗
+  ║        🛍️  KATZ STORE 🛍️          ║
+  ╚════════════════════════════════════╝`,
+      
+      trade: `
+  ╔════════════════════════════════════╗
+  ║        💱 TRADE EXECUTED 💱       ║
+  ╚════════════════════════════════════╝`,
+      
+      alert: `
+  ╔════════════════════════════════════╗
+  ║         ⚡ PRICE ALERT ⚡         ║
+  ╚════════════════════════════════════╝`,
+      
+      error: `
+  ╔════════════════════════════════════╗
+  ║         ❌ ERROR OCCURRED ❌      ║
+  ╚════════════════════════════════════╝`,
+      
+      chat: `
+  ╔════════════════════════════════════╗
+  ║            😼 KATZ! 😼            ║
+  ╚════════════════════════════════════╝`
+    };
+  
+    return headers[type] || null;
   }
 
   async handleCallback(query) {
@@ -146,31 +154,6 @@ export class UnifiedMessageHandler extends EventEmitter {
         show_alert: false
       });
       await ErrorHandler.handle(error, this.bot, query.message?.chat?.id);
-    }
-  }
-
-  async handleAIActions(chatId, actions) {
-    for (const action of actions) {
-      try {
-        switch (action.type) {
-          case 'createAlert':
-            await this.commandRegistry.findCommand('/pricealerts')
-              ?.execute({ chat: { id: chatId }, action });
-            break;
-          case 'executeTrade':
-            await this.commandRegistry.findCommand('/trade')
-              ?.execute({ chat: { id: chatId }, action });
-            break;
-          case 'scanToken':
-            await this.commandRegistry.findCommand('/scan')
-              ?.execute({ chat: { id: chatId }, action });
-            break;
-          default:
-            console.warn(`Unhandled AI action type: ${action.type}`);
-        }
-      } catch (error) {
-        await ErrorHandler.handle(error, this.bot, chatId);
-      }
     }
   }
 

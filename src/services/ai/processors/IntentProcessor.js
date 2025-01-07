@@ -1,3 +1,10 @@
+/*  ====================================================================
+
+        DEPRECATED 7 jAN 2025 in favor of UnifiedMessageProcessor
+
+    ==================================================================  */
+
+import { TRADING_INTENTS } from '../intents.js';
 import { dextools } from '../../dextools/index.js';
 import { timedOrderService } from '../../timedOrders.js';
 import { priceAlertService } from '../../priceAlerts.js';
@@ -25,9 +32,32 @@ export class IntentProcessor {
 
   async processIntent(intent, text, userId, context) {
     try {
+      
+      // If no intent provided, try to match one
+      if (!intent) {
+        const matchResult = await matchIntent(text);
+        if (matchResult) {
+          intent = matchResult.intent;
+          context = { ...context, ...matchResult.data };
+        }
+      }
+  
+      // Handle shopping intents first
+      if (intent === TRADING_INTENTS.PRODUCT_SEARCH || 
+          intent === TRADING_INTENTS.SHOPIFY_SEARCH) {
+        return this.handleShopifySearch(text);
+      }
+
       const network = await networkState.getCurrentNetwork(userId);
 
       switch (intent) {
+
+        case TRADING_INTENTS.PRODUCT_SEARCH:
+          return this.handleShopifySearch(context.keyword || text);
+  
+        case TRADING_INTENTS.TOKEN_TRADE:
+          return this.handleTokenTrade(context);
+          
         case TRADING_INTENTS.PRICE_ALERT:
           return await this.handlePriceAlert(intent, userId, network);
 
@@ -85,7 +115,7 @@ export class IntentProcessor {
           return await this.performInternetSearch(text);
         
         case TRADING_INTENTS.SHOPIFY_SEARCH:
-          return await shopifyService.searchProducts(text);
+          return await this.handleShopifySearch(text);
 
         case TRADING_INTENTS.SHOPIFY_BUY:
           return await shopifyService.createOrder(text);
@@ -178,6 +208,68 @@ export class IntentProcessor {
       throw error;
     }
   }
+
+  
+async handleShopifySearch(query) {
+  try {
+    console.log('🔍 Processing shopping query:', query);
+
+    // Get intent analysis from AI
+    const analysis = await openAIService.generateAIResponse({
+      role: 'system',
+      content: systemPrompts.shopping,
+      messages: [{ role: 'user', content: query }]
+    });
+    
+    // Parse the analysis
+    const { keyword } = typeof analysis === 'string' ? 
+      JSON.parse(analysis) : analysis;
+
+    console.log('🎯 Extracted search keyword:', keyword);
+
+    if (!keyword) {
+      return {
+        text: "I couldn't determine what product you're looking for. Please specify what you'd like to shop for.",
+        type: 'error'
+      };
+    }
+
+    // Search products with extracted keyword
+    const products = await shopifyService.searchProducts(keyword);
+    
+    if (!products?.length) {
+      return {
+        text: `Sorry, I couldn't find any products matching "${keyword}". Try a different search term.`,
+        type: 'search'
+      };
+    }
+
+    // Format rich product display
+    const message = `*KATZ Store Products* 🛍️\n\n${products.map((product, i) => 
+      `${i + 1}. *${product.title}*\n` +
+      `💰 Price: ${product.currency} ${parseFloat(product.price).toFixed(2)}\n` +
+      `${product.description ? `📝 ${product.description.slice(0, 100)}...\n` : ''}` +
+      `${product.available ? '✅ In Stock' : '❌ Out of Stock'}\n` +
+      `${product.image ? `🖼️ [View Image](${product.image})\n` : ''}\n`
+    ).join('\n')}` +
+    '\n_Click product images to view details_';
+
+    return {
+      text: message,
+      type: 'search',
+      products: products,
+      parse_mode: 'Markdown'
+    };
+
+  } catch (error) {
+    console.error('❌ Shopify search error:', error);
+    await ErrorHandler.handle(error);
+    return {
+      text: "Sorry, I encountered an error while searching for products. Please try again later.",
+      type: 'error'
+    };
+  }
+}
 
   async handlePriceAlert(intent, userId, network) {
     if (intent.multiTargets) {

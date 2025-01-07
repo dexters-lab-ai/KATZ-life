@@ -1,7 +1,16 @@
-// Future use to enable broadcasts. Import WebSocket broadcasting utility
-//import { broadcastUpdate } from '../websocketServer.js'; 
-
 export const TRADING_INTENTS = {
+  
+  // Chat History & Context
+  CHAT_HISTORY: 'CHAT_HISTORY',
+  CHAT_SUMMARY: 'CHAT_SUMMARY',
+  CONTEXT_RECALL: 'CONTEXT_RECALL',
+  CONTEXT_REFERENCE: 'CONTEXT_REFERENCE',
+
+  // Enhanced shopping intents
+  PRODUCT_SEARCH: 'PRODUCT_SEARCH',
+  TOKEN_TRADE: 'TOKEN_TRADE',
+  AMBIGUOUS_SEARCH: 'AMBIGUOUS_SEARCH',
+
   // Market Analysis
   TRENDING_CHECK: 'TRENDING_CHECK',
   TOKEN_SCAN: 'TOKEN_SCAN',
@@ -43,6 +52,7 @@ export const TRADING_INTENTS = {
   SOLANA_PAY: 'SOLANA_PAY',
   SHOPIFY_SEARCH: 'SHOPIFY_SEARCH',
   SHOPIFY_BUY: 'SHOPIFY_BUY',
+  PRODUCT_SEARCH: 'PRODUCT_SEARCH',
 
   // AI Guidelines & Strategies
   SAVE_GUIDELINE: 'SAVE_GUIDELINE',
@@ -56,6 +66,57 @@ export const TRADING_INTENTS = {
 };
 
 export const INTENT_PATTERNS = {
+  [TRADING_INTENTS.CHAT_HISTORY]: [
+    'show chat history',
+    'show conversation',
+    'what did we discuss',
+    'previous messages',
+    'our chat',
+    'chat log'
+  ],
+
+  [TRADING_INTENTS.CHAT_SUMMARY]: [
+    'summarize chat',
+    'summarize conversation',
+    'recap our chat',
+    'what have we talked about',
+    'conversation summary'
+  ],
+
+  [TRADING_INTENTS.CONTEXT_RECALL]: [
+    'remember',
+    'recall',
+    'what did I say about',
+    'find in chat',
+    'search chat'
+  ],
+
+  [TRADING_INTENTS.CONTEXT_REFERENCE]: [
+    'that product',
+    'this token',
+    'the one we discussed',
+    'from earlier',
+    'previously mentioned'
+  ],
+  
+  [TRADING_INTENTS.PRODUCT_SEARCH]: [
+    'shop',
+    'buy product',
+    'purchase',
+    'shopping',
+    'store',
+    'merch',
+    'merchandise'
+  ],
+
+  [TRADING_INTENTS.TOKEN_TRADE]: [
+    'trade token',
+    'swap token',
+    'buy token',
+    'sell token',
+    'exchange'
+  ],
+
   [TRADING_INTENTS.TRENDING_CHECK]: [
     'what\'s trending',
     'show trending tokens',
@@ -295,28 +356,3 @@ export const INTENT_PATTERNS = {
     'good night'
   ],
 };
-
-/**
- * Match user input to an intent based on defined patterns.
- * @param {string} userInput - The user input to match.
- * @returns {string|null} - The matching intent or null if no match is found.
- */
-export function matchIntent(userInput) {
-  if (!userInput) return null;
-  
-  const normalizedInput = userInput.toLowerCase();
-  console.log('Matching intent for:', normalizedInput); // Debug logging
-
-  for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
-    for (const pattern of patterns) {
-      if (normalizedInput.includes(pattern.toLowerCase())) {
-        console.log('Matched intent:', intent); // Debug logging
-        return intent;
-      }
-    }
-  }
-  
-  // No specific intent matched
-  return null;
-}
-

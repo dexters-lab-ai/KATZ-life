@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 dotenv.config();
-
+import axios from 'axios';
 import { bot } from './core/bot.js';
 import { setupCommands } from './commands/index.js';
 import { UnifiedMessageHandler } from './core/UnifiedMessageHandler.js';
@@ -8,9 +8,10 @@ import { db } from './core/database.js';
 import { rateLimiter } from './core/rate-limiting/RateLimiter.js';
 import { circuitBreakers } from './core/circuit-breaker/index.js';
 import { walletService } from './services/wallet/index.js';
+import { butlerService } from './services/butler/ButlerService.js';
+import { shopifyService } from './services/shopify/ShopifyService.js';
 import { ErrorHandler } from './core/errors/index.js';
 
-import axios from 'axios';
 
 let isShuttingDown = false;
 
@@ -59,6 +60,10 @@ async function initializeServices() {
     console.log('🔌 Setting up circuit breakers...');
     await circuitBreakers.initialize();
 
+    // Initialize Shopify service
+    console.log('🛍️ Initializing Shopify service...');
+    await shopifyService.initialize();
+
     console.log('✅ Core services initialized successfully.');
   } catch (error) {
     console.error('❌ Error initializing core services:', error);
@@ -89,7 +94,7 @@ async function startAgent() {
     console.log('✅ KATZ AI Agent is up and running!');
     
     // Run the generator
-    generateStorefrontToken().catch(console.error);
+   // await generateStorefrontToken().catch(console.error);
     return bot;
   } catch (error) {
     console.error('❌ Error during agent startup:', error);
