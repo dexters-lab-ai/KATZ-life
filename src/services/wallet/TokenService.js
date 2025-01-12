@@ -2,6 +2,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { ethers } from 'ethers';
 import { walletService } from './index.js';
+import { tokenInfoService } from '../tokens/TokenInfoService.js';
 import { getSolanaTokenInfo } from '../solana/solanaService.js';
 import { config } from '../../core/config.js';
 import { ErrorHandler } from '../../core/errors/index.js';
@@ -139,7 +140,8 @@ class TokenService {
         if (defaultTokens.some(t => t.address === mintAddress)) continue;
 
         try {
-          const symbol = await this.getSolanaTokenSymbol(mintAddress);
+          const tokenInfo  = await this.getSolanaTokenInfo(mintAddress);
+          const symbol = tokenInfo.symbol;
           
           balances.push({
             symbol: symbol || 'Unknown',
@@ -157,7 +159,7 @@ class TokenService {
       throw error;
     }
   }
-
+  /* DEPRECATED BUT KEEPING FOR REFERENCE TO REVERT TO SPLIT TOKEN_INFO
   async getTokenInfo(network, tokenAddress) {
     try {
       if (tokenAddress === 'native') {
@@ -177,6 +179,17 @@ class TokenService {
       await ErrorHandler.handle(error);
       throw error;
     }
+  }
+    */
+  async getTokenInfo(network, tokenAddress) {
+    if (tokenAddress === 'native') {
+      return {
+        symbol: network === 'solana' ? 'SOL' : 'ETH',
+        address: 'native',
+        decimals: network === 'solana' ? 9 : 18
+      };
+    }
+    return tokenInfoService.getTokenInfo(network, tokenAddress);
   }
 
   async getEvmTokenInfo(network, tokenAddress) {
@@ -198,11 +211,6 @@ class TokenService {
       address: tokenAddress,
       decimals: decimals
     };
-  }
-
-  async getSolanaTokenSymbol(mintAddress) {
-    // Implement token metadata lookup
-    return 'Unknown';
   }
 }
 

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { PriceAlert } from '../models/PriceAlert.js';
 import { dextools } from './dextools/index.js';
+import { tokenInfoService } from './tokens/TokenInfoService.js';
 import { walletService } from './wallet/index.js';
 import { tradeService } from './trading/TradeService.js';
 import { ErrorHandler } from '../core/errors/index.js';
@@ -64,20 +65,21 @@ class PriceAlertService extends EventEmitter {
 
   async monitorToken(network, tokenAddress) {
     const key = `${network}:${tokenAddress}`;
-
-    if (this.priceWebsockets.has(key)) {
-      return;
-    }
-
+    
+    if (this.priceWebsockets.has(key)) return;
+  
     try {
-      const ws = await dextools.subscribeToPriceUpdates(network, tokenAddress, (price) =>
-        this.handlePriceUpdate(network, tokenAddress, price)
+      // Subscribe to price updates
+      const ws = await tokenInfoService.subscribeToPriceUpdates(
+        network, 
+        tokenAddress,
+        (price) => this.handlePriceUpdate(network, tokenAddress, price)
       );
-
+  
       this.priceWebsockets.set(key, ws);
     } catch (error) {
       await ErrorHandler.handle(error);
-      throw new Error(`Error monitoring token: ${key}`);
+      throw error;
     }
   }
 

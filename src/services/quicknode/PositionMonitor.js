@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { ErrorHandler } from '../../core/errors/index.js';
 import { circuitBreakers, BREAKER_CONFIGS } from '../../core/circuit-breaker/index.js';
 import { quickNodeService } from './QuickNodeService.js';
+import { tokenInfoService } from '../tokens/TokenInfoService.js';
 
 export class PositionMonitor extends EventEmitter {
   constructor() {
@@ -47,27 +48,69 @@ export class PositionMonitor extends EventEmitter {
 
   async setupRedundantPriceFeeds(token) {
     try {
-      // Primary feed
-      const primaryFeed = await quickNodeService.subscribeToTokenUpdates(
+      // Primary price feed using tokenInfoService
+      const primaryFeed = await tokenInfoService.subscribeToPriceUpdates(
+        token.network,
         token.address,
-        (update) => this.handlePriceUpdate(token.address, update)
+        (price) => this.handlePriceUpdate(token.address, price)
       );
-
-      // Backup oracle
-      const backupOracle = await quickNodeService.setupPriceOracle(token.address);
-
+  
+      // Backup feed using QuickNode
+      const backupFeed = await quickNodeService.subscribeToTokenUpdates(
+        token.address,
+        (update) => {
+          // Only use backup if primary feed fails
+          if (!this.priceFeeds.get(token.address)?.primary?.isActive) {
+            this.handlePriceUpdate(token.address, update.price);
+          }
+        }
+      );
+  
       this.priceFeeds.set(token.address, {
         primary: primaryFeed,
-        backup: backupOracle
+        backup: backupFeed
       });
-
-      // Reset reconnect attempts on success
-      this.reconnectAttempts.delete(token.address);
-
+  
+      // Setup reconnection handling
+      this.setupReconnectHandler(token.address);
+  
+      return {
+        primary: primaryFeed,
+        backup: backupFeed
+      };
     } catch (error) {
-      await this.handleFeedSetupError(error, token);
+      await ErrorHandler.handle(error);
+      throw error;
     }
   }
+  
+  setupReconnectHandler(tokenAddress) {
+    const feeds = this.priceFeeds.get(tokenAddress);
+    if (!feeds) return;
+  
+    // Handle primary feed disconnection
+    feeds.primary.on('close', () => {
+      if (!this.reconnectTimeouts.has(tokenAddress)) {
+        const timeout = setTimeout(() => {
+          this.setupRedundantPriceFeeds({ address: tokenAddress })
+            .catch(error => ErrorHandler.handle(error));
+        }, 1000);
+        this.reconnectTimeouts.set(tokenAddress, timeout);
+      }
+    });
+  
+    // Handle backup feed disconnection
+    feeds.backup.on('close', () => {
+      // Only reconnect backup if primary is also down
+      if (!feeds.primary.isActive && !this.reconnectTimeouts.has(tokenAddress)) {
+        const timeout = setTimeout(() => {
+          this.setupRedundantPriceFeeds({ address: tokenAddress })
+            .catch(error => ErrorHandler.handle(error));
+        }, 1000);
+        this.reconnectTimeouts.set(tokenAddress, timeout);
+      }
+    });
+  }  
 
   async handlePriceUpdate(tokenAddress, update) {
     try {

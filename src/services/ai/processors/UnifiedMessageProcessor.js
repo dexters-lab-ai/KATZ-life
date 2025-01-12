@@ -1,16 +1,30 @@
-import { systemPrompts } from '../prompts.js';
 
+import PQueue from 'p-queue';
+import { retryManager } from '../../queue/RetryManager.js';
+import { systemPrompts } from '../prompts.js';
 import { EventEmitter } from 'events';
+
+// Core services
 import { openAIService } from '../openai.js';
 import { aiMetricsService } from '../../aiMetricsService.js';
 import { contextManager } from '../ContextManager.js';
+import { FlowManager } from '../flows/FlowManager.js';
 import { TRADING_INTENTS } from '../intents.js';
 import { ErrorHandler } from '../../../core/errors/index.js';
+import { intentAnalyzer } from './IntentAnalyzer.js';
+import { IntentProcessHandler } from '../handlers/IntentProcessHandler.js';
+import { validateParameters, getParameterConfig } from '../config/parameterConfig.js';
+import { addressBookService } from '../../addressBook/AddressBookService.js';
+
+// Import learning systems
+import { learningSystem } from '../flows/learning/LearningSystem.js';
+import { userLearningSystem } from '../flows/learning/UserLearningSystem.js';
+import { strategyManager } from '../flows/learning/StrategyManager.js';
+import { patternRecognizer } from '../flows/learning/PatternRecognition.js';
+import { strategyOptimizer } from '../flows/learning/StrategyOptimizer.js';
+
 import { shopifyService } from '../../shopify/ShopifyService.js';
 import { tradeService } from '../../trading/TradeService.js';
-import { TradeFlow } from '../flows/TradeFlow.js';
-import { AlertFlow } from '../flows/AlertFlow.js';
-
 import { dextools } from '../../dextools/index.js';
 import { timedOrderService } from '../../timedOrders.js';
 import { priceAlertService } from '../../priceAlerts.js';
@@ -22,21 +36,59 @@ import { butlerService } from '../../butler/ButlerService.js';
 import { dbAIInterface } from '../../db/DBAIInterface.js';
 import { gemsService } from '../../gems/GemsService.js';
 import { flipperMode } from '../../pumpfun/FlipperMode.js';
-import { gasEstimationService } from '../../gas/GasEstimationService.js';
+import { trendingService } from '../../../services/trending/TrendingService.js';
 import { tokenApprovalService } from '../../tokens/TokenApprovalService.js';
 
 export class UnifiedMessageProcessor extends EventEmitter {
   constructor() {
     super();
+
+    // Add parallel execution queue with optimized concurrency
+    this.queue = new PQueue({ 
+      concurrency: 3,
+      autoStart: true,
+      intervalCap: 10,
+      interval: 1000,
+      carryoverConcurrencyCount: true
+    });
+
+    // State tracking
+    this.activeFlows = new Map();
+    this.pendingIntents = new Map();
+    this.flowManager = new FlowManager();
+
+    // Core services
     this.contextManager = contextManager;
     this.metrics = aiMetricsService;
-    this.tradeFlow = new TradeFlow();
-    this.alertFlow = new AlertFlow();
-    this.activeFlows = new Map();
-    this.intentParameters = new Map(Object.entries(TRADING_INTENTS).map(([key, value]) => [
-      value,
-      this.getParameterConfig(value)
-    ]));
+    this.intentAnalyzer = intentAnalyzer;
+    this.intentProcessor = IntentProcessHandler;
+
+    // Learning systems
+    this.learningSystem = learningSystem;
+    this.userLearning = userLearningSystem;
+    this.strategyManager = strategyManager;
+    this.patternRecognizer = patternRecognizer;
+    this.strategyOptimizer = strategyOptimizer;
+  }
+
+  async initialize() {    
+    if (this.initialized) return;
+    try {
+      // Initialize context manager
+      await this.contextManager.initialize();
+      
+      // Initialize metrics service
+      await this.metrics.initialize();
+      
+      // Initialize flow manager
+      await this.flowManager.initialize();
+      
+      this.initialized = true;
+      console.log('✅ UnifiedMessageProcessor initialized');
+    } catch (error) {
+      console.error('❌ Error initializing UnifiedMessageProcessor:', error);
+      throw error;
+    }
   }
 
   async processMessage(msg, userId) {
@@ -44,29 +96,23 @@ export class UnifiedMessageProcessor extends EventEmitter {
     const startTime = Date.now();
   
     try {
-      // Check for active flow first
-      const activeFlow = this.activeFlows.get(userId);
-      if (activeFlow) {
-        console.log('👉 Continuing active flow:', activeFlow.type);
-        return this.continueFlow(userId, msg.text, activeFlow);
-      }
-  
       // Get conversation context
       const context = await this.contextManager.getContext(userId);
-      console.log('📜 Context loaded:', context);
   
-      // Analyze message with AI first
-      const analysis = await this.analyzeMessage(msg.text, context);
+      // First analyze message intent
+      const analysis = await this.intentAnalyzer.analyzeIntent(msg.text, context);
+      
       console.log('🧠 Message analysis:', analysis);
   
-      // Process based on analysis result
-      const result = await this.processAnalysis(analysis, msg, userId, context);
-      console.log('✨ Processing result:', result);
+      // Validate parameters using parameterConfig
+      const validatedParams = await validateParameters(analysis.intent, analysis.parameters);
   
-      // Update context with new interaction
-      await this.contextManager.updateContext(userId, msg.text, result);
+      // Process based on analysis type
+      const result = analysis.type === 'compound' 
+        ? await this.handleCompoundMessage(analysis, msg, userId)
+        : await this.handleSingleMessage(analysis, msg, userId);
   
-      // Record metrics
+      // Update context and metrics
       await this.metrics.recordIntent(analysis.intent, true, Date.now() - startTime);
   
       return result;
@@ -77,507 +123,454 @@ export class UnifiedMessageProcessor extends EventEmitter {
       throw error;
     }
   }
-  
-  async analyzeMessage(text, context) {
-    console.log('🔍 Analyzing message:', text);
+
+  async handleCompoundMessage(analysis, msg, userId) {
     
-    // Format messages properly for OpenAI
-    const messages = [
-      {
-        role: 'system',
-        content: this.buildSystemPrompt()
-      }
-    ];
-  
-    // Add context messages if they exist
-    if (context?.length) {
-      messages.push(...context.map(msg => ({
-        role: msg.role || 'user',
-        content: typeof msg.content === 'string' ? msg.content : String(msg.content)
-      })));
-    }
-  
-    // Add current message
-    messages.push({
-      role: 'user',
-      content: text
-    });
-  
-    console.log('📤 Sending to OpenAI:', messages);
-  
-    try {
-      const response = await openAIService.generateAIResponse(messages, 'intent_analysis');
-      console.log('📥 OpenAI response:', response);
-      return this.parseAIResponse(response);
-    } catch (error) {
-      console.error('❌ Error analyzing message:', error);
-      // Fallback to basic intent matching
-      return {
-        intent: 'CHAT',
-        confidence: 1.0,
-        parameters: {},
-        requiresContext: false
+    // Track results and resources
+    const results = new Map();
+    const pendingIntents = new Set(analysis.intents);
+    const completedIntents = new Set();
+    let shouldContinue = true;
+
+    try {    
+      // Validate dependencies first
+      await this.validateDependencies(analysis.intents);
+
+      // Track execution state
+      const executionState = {
+        completed: new Set(),
+        failed: new Set(),
+        pending: new Set(analysis.intents.map(i => i.type))
       };
-    }
-  }
 
-  getParameterConfig(intent) {
-    // Define required and optional parameters for each intent
-    const configs = {
-      // Shopping Intents
-      [TRADING_INTENTS.PRODUCT_SEARCH]: {
-        required: ['keyword'],
-        optional: ['category', 'priceRange', 'limit']
-      },
-      [TRADING_INTENTS.SHOPIFY_SEARCH]: {
-        required: ['keyword'],
-        optional: ['category', 'maxPrice', 'minPrice']
-      },
-      [TRADING_INTENTS.SHOPIFY_BUY]: {
-        required: ['productId'],
-        optional: ['quantity']
-      },
+      while (pendingIntents.size > 0 && shouldContinue) {
+        // Find executable intents (dependencies met)
+        const executableIntents = Array.from(pendingIntents)
+          .filter(intent => 
+            !intent.dependsOn?.length || 
+            intent.dependsOn.every(dep => completedIntents.has(dep))
+          );
 
-      // Trading Actions
-      [TRADING_INTENTS.TOKEN_TRADE]: {
-        required: ['action', 'token', 'amount'],
-        optional: ['network', 'slippage', 'deadline']
-      },
-      [TRADING_INTENTS.SWAP_TOKEN]: {
-        required: ['tokenAddress', 'amount', 'direction'],
-        optional: ['network', 'slippage']
-      },
-      [TRADING_INTENTS.SEND_TOKEN]: {
-        required: ['tokenAddress', 'recipientAddress', 'amount'],
-        optional: ['network', 'memo']
-      },
-
-      // Market Analysis
-      [TRADING_INTENTS.TRENDING_CHECK]: {
-        required: [],
-        optional: ['network', 'limit']
-      },
-      [TRADING_INTENTS.TOKEN_SCAN]: {
-        required: ['tokenAddress'],
-        optional: ['network']
-      },
-      [TRADING_INTENTS.MARKET_ANALYSIS]: {
-        required: ['network'],
-        optional: ['timeframe']
-      },
-      [TRADING_INTENTS.KOL_CHECK]: {
-        required: ['keyword'],
-        optional: ['timeframe', 'limit']
-      },
-      [TRADING_INTENTS.GEMS_TODAY]: {
-        required: [],
-        optional: ['network', 'minLiquidity', 'minHolders']
-      },
-
-      // Automated Trading
-      [TRADING_INTENTS.PRICE_ALERT]: {
-        required: ['token', 'targetPrice'],
-        optional: ['action', 'amount', 'network']
-      },
-      [TRADING_INTENTS.TIMED_ORDER]: {
-        required: ['token', 'action', 'amount', 'timing'],
-        optional: ['network', 'slippage']
-      },
-      [TRADING_INTENTS.FLIPPER_MODE]: {
-        required: ['walletAddress'],
-        optional: ['maxPositions', 'profitTarget', 'stopLoss', 'timeLimit']
-      },
-      [TRADING_INTENTS.FLIPPER_CONFIG]: {
-        required: ['walletAddress'],
-        optional: ['profitTarget', 'stopLoss', 'maxPositions', 'timeLimit']
-      },
-      [TRADING_INTENTS.FLIPPER_STATUS]: {
-        required: [],
-        optional: []
-      },
-
-      // Portfolio Management
-      [TRADING_INTENTS.PORTFOLIO_VIEW]: {
-        required: [],
-        optional: ['network']
-      },
-      [TRADING_INTENTS.POSITION_MANAGE]: {
-        required: ['tokenAddress'],
-        optional: ['action', 'takeProfit', 'stopLoss']
-      },
-      [TRADING_INTENTS.TRADE_HISTORY]: {
-        required: [],
-        optional: ['network', 'timeframe', 'limit']
-      },
-
-      // Token Approvals & Gas
-      [TRADING_INTENTS.GAS_ESTIMATE]: {
-        required: ['network', 'transaction'],
-        optional: []
-      },
-      [TRADING_INTENTS.APPROVE_TOKEN]: {
-        required: ['network', 'tokenAddress', 'spenderAddress', 'walletAddress'],
-        optional: ['amount']
-      },
-      [TRADING_INTENTS.REVOKE_APPROVAL]: {
-        required: ['network', 'tokenAddress', 'spenderAddress', 'walletAddress'],
-        optional: []
-      },
-      [TRADING_INTENTS.PRICE_CHECK]: {
-        required: ['tokenAddress'],
-        optional: ['network']
-      },
-
-      // Butler Assistant
-      [TRADING_INTENTS.BUTLER_REMINDER]: {
-        required: ['text'],
-        optional: ['time', 'recurring']
-      },
-      [TRADING_INTENTS.BUTLER_MONITOR]: {
-        required: ['text'],
-        optional: ['duration', 'conditions']
-      },
-      [TRADING_INTENTS.BUTLER_REPORT]: {
-        required: [],
-        optional: ['timeframe']
-      },
-
-      // Payments
-      [TRADING_INTENTS.SOLANA_PAY]: {
-        required: ['amount'],
-        optional: ['label', 'message']
-      },
-
-      // AI Guidelines & Strategies
-      [TRADING_INTENTS.SAVE_GUIDELINE]: {
-        required: ['content'],
-        optional: ['category']
-      },
-      [TRADING_INTENTS.GET_GUIDELINES]: {
-        required: [],
-        optional: ['category']
-      },
-      [TRADING_INTENTS.SAVE_STRATEGY]: {
-        required: ['name', 'description', 'parameters'],
-        optional: []
-      },
-      [TRADING_INTENTS.GET_STRATEGIES]: {
-        required: [],
-        optional: []
-      },
-
-      // Basic Intents
-      [TRADING_INTENTS.CHAT]: {
-        required: [],
-        optional: []
-      },
-      [TRADING_INTENTS.GREETING]: {
-        required: [],
-        optional: []
-      }
-    };
-    return configs[intent] || { required: [], optional: [] };
-  }
-
-  
-parseAIResponse(response) {
-  try {
-    if (typeof response === 'string') {
-      const parsed = JSON.parse(response);
-      return {
-        intent: parsed.intent || 'CHAT',
-        confidence: parsed.confidence || 1.0,
-        parameters: parsed.parameters || {},
-        requiresContext: parsed.requiresContext || false,
-        suggestedFlow: parsed.suggestedFlow || null
-      };
-    }
-    return response;
-  } catch (error) {
-    console.warn('Failed to parse AI response:', error);
-    return {
-      intent: 'CHAT',
-      confidence: 1.0,
-      parameters: {},
-      requiresContext: false
-    };
-  }
-}
-
-
-  buildSystemPrompt() {
-    return `You are KATZ, an AI assistant analyzing user messages for:
-              1. Intent classification
-              2. Parameter extraction based on intent requirements
-              3. Context awareness
-              4. Action determination
-
-              Available Intents and Required Parameters:
-              ${Array.from(this.intentParameters.entries()).map(([intent, config]) => `
-              ${intent}:
-                Required: ${config.required.join(', ') || 'none'}
-                Optional: ${config.optional.join(', ') || 'none'}
-              `).join('\n')}
-
-              Return JSON with:
-              {
-                "intent": string,
-                "confidence": number,
-                "parameters": {
-                  // All required and any optional parameters for the intent
-                },
-                "requiresContext": boolean,
-                "suggestedFlow": string|null
-              }`;
-  }
-  
-  async validateParameters(intent, parameters) {
-    const config = this.intentParameters.get(intent);
-    if (!config) return true;
-
-    const missing = config.required.filter(param => !parameters[param]);
-    if (missing.length > 0) {
-      throw new Error(`Missing required parameters for ${intent}: ${missing.join(', ')}`);
-    }
-
-    return true;
-  }
-
-  async processAnalysis(analysis, msg, userId, context) {
-    try {
-      // Validate analysis object
-      if (!analysis) {
-        throw new Error('Invalid analysis result');
-      }
-  
-      // Handle high confidence intents
-      if (analysis.confidence > 0.8) {
-        const result = await this.executeIntent(analysis.intent, msg.text, userId);
-        
-        // Validate result before logging
-        if (!result || (!result.text && !result.message)) {
-          throw new Error('Invalid response format from intent execution');
+        if (executableIntents.length === 0) {
+          throw new Error('No executable intents found - possible circular dependency');
         }
-        
-        console.log('✨ Processing result:', {
-          text: result.text || result.message,
-          type: result.type || 'chat'
-        });
-        
-        return result;
+
+        // Execute parallel-safe intents concurrently
+        const parallelResults = await this.queue.addAll(
+          executableIntents.map(intent => async () => {
+            try {
+              // Execute intent
+              const result = await this.executeIntent(intent.type, {
+                ...intent.parameters,
+                userId,
+                previousResults: Object.fromEntries(results)
+              });
+
+              // Store result
+              results.set(intent.type, result);
+              completedIntents.add(intent.type);
+              pendingIntents.delete(intent);
+
+              return result;
+            } catch (error) {
+              throw error;
+            }
+          })
+        );
+
+        // Stop processing if condition check failed
+        if (!shouldContinue) {
+          break;
+        }
       }
-  
-      // Handle flows
-      if (analysis.suggestedFlow) {
-        const result = await this.startFlow(analysis.suggestedFlow, msg, userId);
-        console.log('✨ Processing result:', {
-          text: result.text || result.message,
-          type: result.type || 'flow'
-        });
-        return result;
-      }
-  
-      // Handle context-dependent cases
-      if (analysis.requiresContext && context.length > 0) {
-        const result = await this.handleContextualResponse(analysis, msg, context);
-        console.log('✨ Processing result:', {
-          text: result.text || result.message,
-          type: result.type || 'contextual'
-        });
-        return result;
-      }
-  
-      // Fallback to conversation
-      const result = await this.handleConversation(msg.text, userId, context);
-      console.log('✨ Processing result:', {
-        text: result.text || result.message,
-        type: result.type || 'chat'
+
+      // Update learning systems
+      await this.updateLearningData(userId, {
+        analysis,
+        results: Array.from(results.values()),
+        message: msg.text
       });
+
+      // Handle partial completion
+      if (executionState.failed.size > 0) {
+        this.emit('partialCompletion', {
+          userId,
+          completed: Array.from(executionState.completed),
+          failed: Array.from(executionState.failed)
+        });
+      }
+
+      return this.formatCompoundResults(Array.from(results.values()));
+    } catch (error) {
+      // Cleanup resources
+      results.cleanup();
+      pendingIntents.cleanup();
+      completedIntents.cleanup();
+      shouldContinue = false;
+
+      await ErrorHandler.handle(error);
+      throw error;
+    }
+  }
+
+  async handleSingleMessage(analysis, msg, userId) {
+    try {
+      // Execute intent with retry
+      const result = await retryManager.executeWithRetry(async () => {
+        return await this.executeIntent(analysis.intent, {
+          ...analysis.parameters,
+          userId,
+          text: msg.text
+        });
+      });
+
+      return {
+        type: analysis.intent,
+        text: result.response,
+        data: result.data
+      };
+    } catch (error) {
+      await ErrorHandler.handle(error);
+      throw error;
+    }
+  }
+
+  async handleCashtagQuery(msg, userId) {
+    const cashtag = msg.text.substring(1).split(' ')[0];
+    await flowManager.startFlow(userId, 'twitter_search', {
+      cashtag,
+      context: msg.context
+    });
+    
+    const initialState = await searchFlow.start({ 
+      cashtag,
+      context: msg.text,
+      userId,
+      timestamp: Date.now()
+    });
+
+    this.activeFlows.set(userId, {
+      type: 'twitter_search',
+      state: initialState
+    });
+
+    return {
+      text: initialState.response,
+      type: 'twitter_search',
+      requiresInput: true
+    };
+  }
+
+  formatCompoundResults(results) {
+    return {
+      text: results.map(r => r.text).join('\n\n'),
+      type: 'compound',
+      results: results.map(r => ({
+        type: r.type,
+        success: !r.error,
+        data: r.data
+      }))
+    };
+  }
+
+  async updateLearningData(userId, data) {
+    try {
+      // Update user learning data
+      await this.userLearning.updateUserPreferences(userId, data);
+
+      // Analyze patterns
+      const patterns = await this.patternRecognizer.analyzePatterns(data);
+      
+      // Update strategy if needed
+      if (patterns.length > 0) {
+        const optimizedStrategy = await this.strategyOptimizer.optimizeStrategy(
+          await this.strategyManager.getTopStrategies(userId, 1),
+          patterns
+        );
+
+        // Emit optimization proposal
+        this.emit('strategyOptimization', {
+          userId,
+          proposal: optimizedStrategy
+        });
+      }
+    } catch (error) {
+      console.warn('Learning data update failed:', error);
+    }
+  }
+
+  async updateProgress(userId, status) {
+    try {
+      // Format progress message based on status type
+      let message;
+      switch (status.type) {
+        case 'intent_start':
+          message = `🔄 Processing ${status.intent}...`;
+          break;
+        case 'intent_complete':
+          message = `✅ Completed ${status.intent}`;
+          break;
+        case 'intent_error':
+          message = `❌ Error: ${status.error}`;
+          break;
+        default:
+          message = `${status.message || 'Processing...'}`;
+      }
+  
+      // Emit progress event
+      this.emit('progress', {
+        userId,
+        type: status.type,
+        message,
+        timestamp: Date.now(),
+        metadata: status
+      });
+  
+    } catch (error) {
+      console.warn('Error updating progress:', error);
+    }
+  }
+
+  // Update executeIntent method to use progress tracking
+  async executeIntent(intent, params) {
+    try {
+
+      // Format parameters before processing
+      const formattedParams = formatParameters(intent, params);
+      
+      // Update progress before execution
+      await this.updateProgress(formattedParams.userId, {
+        type: 'intent_start',
+        intent,
+        step: 1,
+        message: `Processing ${intent}...`
+      });
+  
+      // Execute the intent
+      const result = await this.processIntent(intent, formattedParams);
+  
+      // Update progress after completion 
+      await this.updateProgress(formattedParams.userId, {
+        type: 'intent_complete',
+        intent,
+        success: true,
+        message: `Completed ${intent}`
+      });
+  
       return result;
   
     } catch (error) {
-      console.error('Error in processAnalysis:', error);
-      await ErrorHandler.handle(error);
-      return {
-        text: "I encountered an error processing your request. Please try again.",
-        type: 'error'
-      };
+      // Update progress on error
+      await this.updateProgress(params.userId, {
+        type: 'intent_error',
+        intent,
+        error: error.message,
+        message: `Error processing ${intent}: ${error.message}`
+      });
+  
+      throw error;
     }
   }
-
-  async executeIntent(intent, text, userId, context) {
+  
+  async processIntent(intent, text, userId, context) {
     try {
       const network = await networkState.getCurrentNetwork(userId);
   
       switch (intent) {
+        // Trading Actions
         case TRADING_INTENTS.QUICK_TRADE:
-          return await this.handleQuickTrade(intent, userId, network);
-
         case TRADING_INTENTS.TOKEN_TRADE:
+          if (!intent.tokenAddress || !intent.amount) {
+            throw new Error('Missing required trade parameters');
+          }
           return await tradeService.executeTrade({
             network,
             userId,
-            tokenAddress: text,
-            amount: text,
-          });
-
-        case TRADING_INTENTS.SOLANA_PAY:
-          return await solanaPayService.createPayment(text);
-
-        case TRADING_INTENTS.SAVE_STRATEGY:
-          return await dbAIInterface.saveTradingStrategy(userId, { strategy: text });
-
-        case TRADING_INTENTS.GET_STRATEGIES:
-  return await dbAIInterface.getTradingStrategies(userId);
-
-case TRADING_INTENTS.BUTLER_REMINDER:
-  return await butlerService.setReminder(userId, text);
-
-case TRADING_INTENTS.BUTLER_MONITOR:
-  return await butlerService.startMonitoring(userId, text);
-
-case TRADING_INTENTS.BUTLER_REPORT:
-  return await butlerService.generateReport(userId);
-
-case TRADING_INTENTS.SAVE_GUIDELINE:
-  return await dbAIInterface.saveUserGuideline(userId, text);
-
-case TRADING_INTENTS.GET_GUIDELINES:
-  return await dbAIInterface.getUserGuidelines(userId);
-
-case TRADING_INTENTS.POSITION_MANAGE:
-  return await flipperMode.getOpenPositions();
-
-case TRADING_INTENTS.TRADE_HISTORY:
-  return await walletService.getTradeHistory(userId);
-
-
-        case TRADING_INTENTS.PRICE_ALERT:
-          return await this.handlePriceAlert(intent, userId, network);
-  
-        case TRADING_INTENTS.TIMED_ORDER:
-          return await this.handleTimedOrder(intent, userId, network);
-  
-        case TRADING_INTENTS.QUICK_TRADE:
-          return await this.handleQuickTrade(intent, userId, network);
-  
-        case TRADING_INTENTS.GAS_ESTIMATE:
-          return await this.handleGasEstimate(network, text);
-  
-        case TRADING_INTENTS.APPROVE_TOKEN:
-          return await this.handleTokenApproval(network, text);
-  
-        case TRADING_INTENTS.REVOKE_APPROVAL:
-          return await tokenApprovalService.revokeApproval(network, text);
-  
-        case TRADING_INTENTS.PRICE_CHECK:
-          return await this.handlePriceCheck(network, text);
-  
-        case TRADING_INTENTS.FLIPPER_CONFIG:
-          return await this.handleFlipperConfig(userId, text);
-  
-        case TRADING_INTENTS.FLIPPER_STATUS:
-          return await flipperMode.getStatus();
-  
-        case TRADING_INTENTS.SWAP_TOKEN:
-          return await walletService.executeTrade(network, {
-            action: 'swap',
-            tokenAddress: text,
-            amount: text,
-            userId
+            action: intent.action,
+            tokenAddress: intent.tokenAddress,
+            amount: intent.amount,
+            options: intent.options
           });
   
-        case TRADING_INTENTS.PORTFOLIO_VIEW:
-          return await walletService.getWallets(userId);
-  
-        case TRADING_INTENTS.TRENDING_CHECK:
-          return await dextools.fetchTrendingTokens(network);
-  
+        // Token Analysis & Market Data  
         case TRADING_INTENTS.TOKEN_SCAN:
           return await dextools.formatTokenAnalysis(network, text);
   
-        case TRADING_INTENTS.MARKET_ANALYSIS:
-          return await dextools.getMarketOverview(network);
+        case TRADING_INTENTS.TRENDING_CHECK:
+          return await trendingService.getTrendingTokens(network);
   
-        case TRADING_INTENTS.KOL_CHECK:
-          return await twitterService.searchTweets(text);
+        case TRADING_INTENTS.MARKET_ANALYSIS:
+          return await trendingService.getMarketOverview(network);
   
         case TRADING_INTENTS.GEMS_TODAY:
           return await gemsService.scanGems();
   
-        case TRADING_INTENTS.INTERNET_SEARCH:
-          return await this.performInternetSearch(text);
+        // Social & KOL Analysis
+        case TRADING_INTENTS.KOL_CHECK:
+          return await twitterService.searchTweets(text);
+  
+        case TRADING_INTENTS.KOL_MONITOR_SETUP:
+          return await this.flowManager.startFlow('kolMonitor', {
+            userId,
+            initialData: intent.parameters
+          });
+  
+        // Automated Trading
+        case TRADING_INTENTS.FLIPPER_MODE:
+          return await flipperMode.start(userId, intent.walletAddress, intent.parameters);
+  
+        case TRADING_INTENTS.FLIPPER_CONFIG:
+          return await flipperMode.updateConfig(userId, intent.parameters);
+  
+        case TRADING_INTENTS.FLIPPER_STATUS:
+          return await flipperMode.getStatus(userId);
+  
+        // Orders & Alerts
+        case TRADING_INTENTS.PRICE_ALERT:
+          return await priceAlertService.createAlert(userId, {
+            tokenAddress: intent.tokenAddress,
+            targetPrice: intent.targetPrice,
+            condition: intent.condition,
+            network,
+            walletAddress: intent.walletAddress,
+            swapAction: intent.swapAction
+          });
+  
+        case TRADING_INTENTS.TIMED_ORDER:
+          return await timedOrderService.createOrder(userId, {
+            tokenAddress: intent.tokenAddress,
+            action: intent.action,
+            amount: intent.amount,
+            executeAt: intent.timing,
+            network
+          });
+  
+        case TRADING_INTENTS.MULTI_TARGET_ORDER:
+          return await this.flowManager.startFlow('multiTarget', {
+            userId,
+            initialData: intent.parameters
+          });
+  
+        // Portfolio & Positions
+        case TRADING_INTENTS.PORTFOLIO_VIEW:
+          return await walletService.getWallets(userId);
+  
+        case TRADING_INTENTS.POSITION_MANAGE:
+          return await flipperMode.getOpenPositions(userId);
+  
+        case TRADING_INTENTS.TRADE_HISTORY:
+          return await walletService.getTradeHistory(userId);
+  
+        // Token Operations
+        case TRADING_INTENTS.PRICE_CHECK:
+          return await dextools.getTokenPrice(network, intent.tokenAddress);
+  
+        case TRADING_INTENTS.APPROVE_TOKEN:
+          return await tokenApprovalService.approveToken(network, {
+            tokenAddress: intent.tokenAddress,
+            spenderAddress: intent.spenderAddress,
+            amount: intent.amount,
+            walletAddress: intent.walletAddress
+          });
+  
+        case TRADING_INTENTS.REVOKE_APPROVAL:
+          return await tokenApprovalService.revokeApproval(network, {
+            tokenAddress: intent.tokenAddress,
+            spenderAddress: intent.spenderAddress,
+            walletAddress: intent.walletAddress
+          });
+  
+        // Solana Payments & Shopify Shopping
+        case TRADING_INTENTS.SOLANA_PAY:
+          return await solanaPayService.createPayment({
+            amount: intent.amount,
+            recipient: intent.recipient,
+            reference: intent.reference,
+            label: intent.label
+          });
   
         case TRADING_INTENTS.SHOPIFY_SEARCH:
           const products = await shopifyService.searchProducts(text);
           if (!products?.length) {
             return {
-              text: "I couldn't find any products matching your search.",
+              text: "No products found matching your search.",
               type: 'search'
             };
           }
-          const productList = products.map(product => (
-            `🛍️ [${product.title}](${product.url})\n` +
-            `💰 ${product.price} ${product.currency}\n` +
-            `${product.description ? `📝 ${product.description}\n` : ''}` +
-            `🔗 Product ID: \`${product.id}\``
-          )).join('\n\n');
-          return {
-            text: `*Found ${products.length} Products:*\n\n${productList}`,
-            type: 'search',
-            parse_mode: 'Markdown'
-          };
+          
+          // Handle single product differently
+          if (products.length === 1) {
+            return this.formatSingleProduct(products[0]);
+          }
+          
+          // Handle multiple products
+          return this.formatShopifyResults(products);
   
         case TRADING_INTENTS.SHOPIFY_BUY:
-          const product = await shopifyService.getProductById(text);
-          if (!product) {
-            return {
-              text: "Sorry, I couldn't find that product.",
-              type: 'error'
-            };
-          }
-          const checkout = await shopifyService.createCheckout(product.variantId);
-          const payment = await solanaPayService.createPayment(checkout.totalAmount);
-          return {
-            text: `*Ready to Purchase ${product.title}*\n\n` +
-                  `💰 Total: ${checkout.totalAmount} ${product.currency}\n\n` +
-                  `Scan the QR code or click the payment link to complete your purchase.`,
-            type: 'payment',
-            payment_url: payment.paymentUrl,
-            qr_code: payment.qrCode
-          };
+          return await shopifyService.createOrder(intent.productId);
   
+        // Butler Assistant
+        case TRADING_INTENTS.BUTLER_REMINDER:
+          return await butlerService.setReminder(userId, text);
+  
+        case TRADING_INTENTS.BUTLER_MONITOR:
+          return await butlerService.startMonitoring(userId, text);
+  
+        case TRADING_INTENTS.BUTLER_REPORT:
+          return await butlerService.generateReport(userId);
+  
+        // AI Guidelines & Strategies
+        case TRADING_INTENTS.SAVE_GUIDELINE:
+          return await dbAIInterface.saveUserGuideline(userId, text);
+  
+        case TRADING_INTENTS.GET_GUIDELINES:
+          return await dbAIInterface.getUserGuidelines(userId);
+  
+        case TRADING_INTENTS.SAVE_STRATEGY:
+          return await dbAIInterface.saveTradingStrategy(userId, { strategy: text });
+  
+        case TRADING_INTENTS.GET_STRATEGIES:
+          return await dbAIInterface.getTradingStrategies(userId);
+  
+        // Research & Analysis
+        case TRADING_INTENTS.INTERNET_SEARCH:
+          return await this.performInternetSearch(text);
+  
+        // Context & History
         case TRADING_INTENTS.CHAT_HISTORY:
-          const history = await this.contextManager.getContext(userId);
           return {
-            text: this.formatChatHistory(history),
+            text: await this.contextManager.getContext(userId),
             type: 'history'
           };
   
         case TRADING_INTENTS.CHAT_SUMMARY:
-          const summary = await this.contextManager.getContextSummary(userId);
           return {
-            text: summary,
+            text: await this.contextManager.getContextSummary(userId),
             type: 'summary'
           };
   
         case TRADING_INTENTS.CONTEXT_RECALL:
-          const searchResults = await this.contextManager.searchContext(userId, text);
           return {
-            text: searchResults,
+            text: await this.contextManager.searchContext(userId, text),
             type: 'search'
           };
   
         case TRADING_INTENTS.CONTEXT_REFERENCE:
           const reference = await this.contextManager.resolveReference(userId, text);
           if (reference) {
-            return this.executeIntent(reference.originalIntent, reference.data, userId);
+            // Handle product references
+            if (reference.type === 'product') {
+              return await this.handleProductReference(userId, reference.identifier);
+            }
+            // Handle other reference types
+            return await this.handleConversation(text, userId, ('context: ', context + ' reference: ', reference.data));
           }
           return {
             text: "I couldn't find what you're referring to. Could you be more specific?",
             type: 'error'
           };
   
+        // Chat & Conversation
         case TRADING_INTENTS.CHAT:
         case TRADING_INTENTS.GREETING:
           return await this.handleConversation(text, userId, context);
@@ -590,147 +583,6 @@ case TRADING_INTENTS.TRADE_HISTORY:
       throw error;
     }
   }
-  
-  async handleProductSearch(query) {
-    // console.log('🔍 Processing shopping query:', query);
-
-    try {
-      // Extract product name using AI
-      const productNamePrompt = [
-        {
-          role: 'system',
-          content: `Extract only the main product name or type from the query. 
-          Return ONLY the product name, nothing else.
-          Examples:
-          "I want to buy a snowboard" -> "snowboard"
-          "Looking for winter gear and boots" -> "winter gear"
-          "Show me some KATZ merch" -> "KATZ merch"
-          "Need a new t-shirt in black" -> "t-shirt"`
-        },
-        {
-          role: 'user',
-          content: query
-        }
-      ];
-  
-      const keyword = await openAIService.generateAIResponse(productNamePrompt, 'shopping');
-      
-      if (!keyword?.trim()) {
-        return {
-          text: "I couldn't determine what product you're looking for. Please be more specific.",
-          type: 'error'
-        };
-      }
-  
-      // Search products with extracted keyword
-      const products = await shopifyService.searchProducts(keyword.trim().toLowerCase());
-      
-      if (!products?.length) {
-        return {
-          text: `No products found matching "${keyword}". Try a different search term.`,
-          type: 'search'
-        };
-      }
-  
-      // Take first product for image presentation
-      const featuredProduct = products[0];
-  
-      // Format message with all products
-      const message = [
-        '*KATZ Store Products* 🛍️\n',
-        ...products.slice(0, 5).map((product, i) => [
-          `${i + 1}. *${product.title}*`,
-          `💰 ${product.currency} ${parseFloat(product.price).toFixed(2)}`,
-          `${product.available ? '✅ In Stock' : '❌ Out of Stock'}`,
-          `[View Product](${product.image})`,
-          '' // Empty line for spacing
-        ].join('\n'))
-      ].join('\n');
-  
-      return {
-        text: message,
-        type: 'search',
-        parse_mode: 'Markdown',
-        image: featuredProduct.image // Single featured product image
-      };
-  
-    } catch (error) {
-      console.error('❌ Product search error:', error);
-      await ErrorHandler.handle(error);
-      return {
-        text: "Sorry, I encountered an error while searching. Please try again.",
-        type: 'error'
-      };
-    }
-  }
-
-  async startFlow(flowType, msg, userId) {
-    const flow = flowType === 'trade' ? this.tradeFlow : this.alertFlow;
-    const initialState = await flow.start(msg, userId);
-    
-    this.activeFlows.set(userId, {
-      type: flowType,
-      state: initialState
-    });
-
-    return {
-      text: initialState.response,
-      type: flowType,
-      requiresInput: true
-    };
-  }
-
-  async continueFlow(userId, input, activeFlow) {
-    try {
-      const flow = activeFlow.type === 'trade' ? this.tradeFlow : this.alertFlow;
-      const result = await flow.processStep(activeFlow.state, input);
-
-      if (result.completed) {
-        this.activeFlows.delete(userId);
-        return {
-          text: result.response,
-          type: activeFlow.type,
-          data: result.data,
-          completed: true
-        };
-      }
-
-      this.activeFlows.set(userId, {
-        type: activeFlow.type,
-        state: result.flowData
-      });
-
-      return {
-        text: result.response,
-        type: activeFlow.type,
-        requiresInput: true
-      };
-    } catch (error) {
-      await ErrorHandler.handle(error);
-      this.activeFlows.delete(userId);
-      throw error;
-    }
-  }
-
-  async handleContextualResponse(analysis, msg, context) {
-    const enhancedPrompt = this.buildContextualPrompt(analysis, context);
-    const response = await openAIService.generateAIResponse(enhancedPrompt);
-    return {
-      text: response,
-      type: 'contextual',
-      requiresFollowUp: true
-    };
-  }
-
-  async handleConversation(text, userId, context = []) {
-    const response = await openAIService.generateAIResponse(
-      this.buildConversationPrompt(text, context)
-    );
-    return {
-      text: response,
-      type: 'chat'
-    };
-  }
 
   buildContextualPrompt(analysis, context) {
     return {
@@ -740,16 +592,21 @@ case TRADING_INTENTS.TRADE_HISTORY:
     };
   }
 
-  buildConversationPrompt(text, context) {
+  buildConversationPrompt(text, context = []) {
+    // Ensure context is an array
+    const safeContext = Array.isArray(context) ? context : [];
+    
     return {
       role: 'system',
-      content: 'You are KATZ having a conversation. Maintain sarcastic personality.',
-      messages: [...context, { role: 'user', content: text }]
+      content: 'You are KATZ having a conversation. Maintain sarcastic personality about crypto/meme trading, research, shopify, payments, internet news, twitter trends, pumpfun, bitcoin, tasks and reminders. Consise responses',
+      messages: [...safeContext, { role: 'user', content: text }]
     };
-  }
+  }  
 
   cleanup() {
     this.activeFlows.clear();
+    this.flowManager.cleanup();
+    this.initialized = false;
     this.removeAllListeners();
   }
 }

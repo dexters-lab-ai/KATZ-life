@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { TimedOrder } from '../models/TimedOrder.js';
 import { dextools } from './dextools/index.js';
 import { tradeService } from './trading/TradeService.js';
+import { tokenInfoService } from './tokens/TokenInfoService.js';
 import { format } from 'date-fns';
 import PQueue from 'p-queue';
 import mongoose from 'mongoose';
@@ -130,11 +131,6 @@ class TimedOrderService extends EventEmitter {
     });
   }
 
-  handlePriceUpdate(network, tokenAddress, price) {
-    // Store latest price for use during execution
-    this.emit('priceUpdate', { network, tokenAddress, price });
-  }
-
   scheduleOrderGroup(orders, executeTime) {
     const now = Date.now();
     const delay = Math.max(0, executeTime - now);
@@ -245,32 +241,103 @@ class TimedOrderService extends EventEmitter {
       const order = new TimedOrder({
         userId: userId.toString(),
         ...orderData,
-        status: 'pending'
+        status: 'pending',
+        orderType: orderData.orderType || 'standard'
       });
-
+  
       await order.save();
-
-      // Set up price monitoring if needed
-      if (['trailing', 'conditional'].includes(order.orderType)) {
-        await this.setupPriceMonitoring(order);
+  
+      // Setup monitoring based on order type
+      switch(order.orderType) {
+        case 'trailing':
+          await this.setupTrailingStop(order);
+          break;
+        case 'scaled':
+          await this.createScaledOrders(order);
+          break;
+        case 'conditional':
+          await this.setupConditionalMonitoring(order);
+          break;
+        case 'chain':
+          await this.setupChainedOrders(order);
+          break;
       }
-
-      // Handle multi-orders
-      if (order.orderType === 'multi') {
-        await this.createSplitOrders(order);
-      }
-
-      this.emit('orderCreated', {
-        userId,
-        orderId: order._id,
-        type: order.orderType
-      });
-
+  
       return order;
     } catch (error) {
-      console.error('Error creating advanced order:', error);
-      this.emit('error', error);
+      await ErrorHandler.handle(error);
       throw error;
+    }
+  }
+
+  async setupTrailingStop(order) {
+    const { trailAmount } = order.conditions;
+    let highestPrice = await this.getCurrentPrice(order.tokenAddress);
+  
+    // Subscribe to price updates
+    await dextools.subscribeToPriceUpdates(
+      order.network,
+      order.tokenAddress,
+      async (price) => {
+        // Update highest price if new high reached
+        if (price > highestPrice) {
+          highestPrice = price;
+          // Update stop price
+          const stopPrice = highestPrice * (1 - trailAmount/100);
+          await order.updateTrailingStop(stopPrice);
+        }
+        // Check if price fell below stop
+        else if (price <= order.conditions.stopPrice) {
+          await this.executeOrder(order);
+        }
+      }
+    );
+  }
+  
+  async createScaledOrders(parentOrder) {
+    const { levels, priceStep, amountPerLevel } = parentOrder.conditions;
+    const basePrice = await this.getCurrentPrice(parentOrder.tokenAddress);
+  
+    for (let i = 0; i < levels; i++) {
+      const targetPrice = basePrice * (1 + priceStep * i);
+      await this.createOrder(parentOrder.userId, {
+        ...parentOrder,
+        amount: amountPerLevel,
+        conditions: {
+          targetPrice,
+          parentOrderId: parentOrder._id
+        }
+      });
+    }
+  }
+  
+  async setupConditionalMonitoring(order) {
+    const { conditions } = order;
+    
+    // Subscribe to required data sources
+    if (conditions.priceTarget) {
+      await this.monitorPrice(order);
+    }
+    if (conditions.volumeTarget) {
+      await this.monitorVolume(order);
+    }
+    if (conditions.timeWindow) {
+      await this.setupTimeWindow(order);
+    }
+  }
+  
+  async setupChainedOrders(order) {
+    const { chain } = order.conditions;
+    
+    // Create subsequent orders
+    for (const nextOrder of chain) {
+      await this.createOrder(order.userId, {
+        ...nextOrder,
+        conditions: {
+          ...nextOrder.conditions,
+          dependsOn: order._id
+        }
+      });
     }
   }
 
@@ -300,40 +367,21 @@ class TimedOrderService extends EventEmitter {
 
   async handlePriceUpdate(network, tokenAddress, price) {
     try {
-      // Update trailing stops
-      const trailingOrders = await TimedOrder.find({
+      const tokenInfo = await tokenInfoService.getTokenInfo(network, tokenAddress);
+      if (!tokenInfo?.price) return;
+
+      // Check orders that depend on this token's price
+      const orders = await TimedOrder.find({
         network,
         tokenAddress,
-        orderType: 'trailing',
         status: 'pending'
       });
 
-      for (const order of trailingOrders) {
-        await order.updateTrailingStop(price);
-      }
-
-      // Check conditional orders
-      const conditionalOrders = await TimedOrder.find({
-        network,
-        tokenAddress,
-        orderType: 'conditional',
-        status: 'pending'
-      });
-
-      for (const order of conditionalOrders) {
-        const shouldExecute = await order.checkConditions({
-          price,
-          network,
-          tokenAddress
-        });
-
-        if (shouldExecute) {
-          await this.executeOrder(order);
-        }
+      for (const order of orders) {
+        await this.checkOrderConditions(order, tokenInfo.price);
       }
     } catch (error) {
-      console.error('Error handling price update:', error);
-      this.emit('error', error);
+      await ErrorHandler.handle(error);
     }
   }
 

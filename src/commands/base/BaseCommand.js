@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import { UserState } from '../../utils/userState.js';
 import { createKeyboard } from '../../utils/keyboard.js';
 import { ErrorHandler } from '../../core/errors/index.js';
+import { networkState } from '../../services/networkState.js';
 
 export class BaseCommand extends EventEmitter {
   constructor(bot) {
@@ -33,6 +34,23 @@ export class BaseCommand extends EventEmitter {
 
   async handleInput(msg) {
     return false;
+  }
+
+  // Network switch management
+  async handleNetworkSwitch(chatId, from, to) {
+    await this.bot.sendMessage(
+      chatId,
+      `🔄 Switching network from *${networkState.getNetworkDisplay(from)}* to *${networkState.getNetworkDisplay(to)}* to execute your request...`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+  
+  async handleNetworkSwitched(chatId, network) {
+    await this.bot.sendMessage(
+      chatId,
+      `✅ Switched to *${networkState.getNetworkDisplay(network)}*\nProceeding with execution...`,
+      { parse_mode: 'Markdown' }
+    );
   }
 
   createKeyboard(buttons, options = {}) {

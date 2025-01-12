@@ -1,6 +1,7 @@
 import { BaseCommand } from '../base/BaseCommand.js';
 import { ScanHandler } from './handlers/ScanHandler.js';
 import { networkState } from '../../services/networkState.js';
+import { tokenInfoService } from '../../services/tokens/TokenInfoService.js';
 import { USER_STATES } from '../../core/constants.js';
 import { ErrorHandler } from '../../core/errors/index.js';
 
@@ -24,9 +25,51 @@ export class ScanCommand extends BaseCommand {
   async execute(msg) {
     const chatId = msg.chat.id;
     try {
+      // Check if message is natural language input
+      if (msg.text && !msg.text.startsWith('/')) {
+        return this.handleNaturalLanguageInput(msg);
+      }
+      
       await this.showScanOptions(chatId);
     } catch (error) {
       await ErrorHandler.handle(error, this.bot, chatId);
+    }
+  }
+
+  async handleNaturalLanguageInput(msg) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    try {
+      // Extract token from natural language
+      const tokenMatch = msg.text.match(/scan\s+([a-zA-Z0-9]+)/i);
+      if (!tokenMatch) return false;
+
+      const tokenInput = tokenMatch[1];
+      const network = await networkState.getCurrentNetwork(userId);
+      
+      // Try to find token
+      const tokenInfo = await tokenInfoService.validateToken(network, tokenInput);
+      if (!tokenInfo) {
+        await this.bot.sendMessage(chatId,
+          "I couldn't find that token. Please provide the token address:",
+          {
+            reply_markup: {
+              inline_keyboard: [[
+                { text: '❌ Cancel', callback_data: 'back_to_menu' }
+              ]]
+            }
+          }
+        );
+        return true;
+      }
+
+      // Scan found token
+      await this.scanHandler.handleTokenScan(chatId, tokenInfo.address, msg.from);
+      return true;
+    } catch (error) {
+      await ErrorHandler.handle(error, this.bot, chatId);
+      return false;
     }
   }
 
@@ -49,7 +92,8 @@ export class ScanCommand extends BaseCommand {
           '• LP Value & Distribution\n' +
           '• Security Score & Risks\n' +
           '• Social Links & Info\n\n' +
-          'Enter a token address to begin scanning.',
+          'Enter a token address or try natural language like:\n' +
+          '"scan PEPE" or "analyze BONK"',
         {
           parse_mode: 'Markdown',
           reply_markup: keyboard,
@@ -113,7 +157,25 @@ export class ScanCommand extends BaseCommand {
 
     if (state === USER_STATES.WAITING_SCAN_INPUT && msg.text) {
       try {
-        await this.scanHandler.handleTokenScan(chatId, msg.text.trim(), msg.from);
+        // Validate token first
+        const network = await networkState.getCurrentNetwork(userId);
+        const tokenInfo = await tokenInfoService.validateToken(network, msg.text.trim());
+        
+        if (!tokenInfo) {
+          await this.bot.sendMessage(chatId,
+            '❌ Invalid token address or symbol. Please try again:',
+            {
+              reply_markup: {
+                inline_keyboard: [[
+                  { text: '❌ Cancel', callback_data: 'back_to_menu' }
+                ]]
+              }
+            }
+          );
+          return true;
+        }
+
+        await this.scanHandler.handleTokenScan(chatId, tokenInfo.address, msg.from);
         await this.clearState(userId);
         return true;
       } catch (error) {

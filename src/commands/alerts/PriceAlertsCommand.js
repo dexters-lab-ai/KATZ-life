@@ -2,7 +2,7 @@ import { BaseCommand } from '../base/BaseCommand.js';
 import { AlertHandler } from './handlers/AlertHandler.js';
 import { USER_STATES } from '../../core/constants.js';
 import { ErrorHandler } from '../../core/errors/index.js';
-import { networkState } from '../../services/networkState.js';
+import { FlowManager } from '../../services/ai/flows/FlowManager.js';
 
 export class PriceAlertsCommand extends BaseCommand {
   constructor(bot, eventHandler) {
@@ -15,6 +15,7 @@ export class PriceAlertsCommand extends BaseCommand {
     this.eventHandler = eventHandler;
 
     this.registerCallbacks();
+    this.flowManager = new FlowManager();
   }
 
   registerCallbacks() {
@@ -56,31 +57,22 @@ export class PriceAlertsCommand extends BaseCommand {
     );
   }
 
-  async handleCallback(query) {
-    const action = query.data;
-
-    try {
-      const handled = this.eventHandler.emit(action, query);
-      if (!handled) {
-        console.warn(`Unhandled callback action: ${action}`);
-      }
-    } catch (error) {
-      await ErrorHandler.handle(error, this.bot, query.message.chat.id);
-    }
-  }
-
   async handleCreatePriceAlert(query) {
     const chatId = query.message.chat.id;
     const userInfo = query.from;
 
     try {
-      await this.setState(userInfo.id, USER_STATES.WAITING_PRICE_ALERT);
+      // Start alert flow with initial data
+      const result = await this.flowManager.startFlow(userInfo.id, 'alert', {
+        chatId,
+        userInfo,
+        type: 'price_alert'
+      });
+
+      // Show initial prompt based on flow response
       await this.bot.sendMessage(
         chatId,
-        '*Create Price Alert* 🎯\n\n' +
-          'Please enter in this format:\n' +
-          '`<token_address> <target_price> [above|below]`\n\n' +
-          'Example: `0x123...abc 0.5 above`',
+        result.response || '*Create Price Alert* 🎯\n\nPlease enter the token address:',
         {
           parse_mode: 'Markdown',
           reply_markup: {
@@ -88,6 +80,63 @@ export class PriceAlertsCommand extends BaseCommand {
           },
         }
       );
+    } catch (error) {
+      await ErrorHandler.handle(error, this.bot, chatId);
+    }
+  }
+
+  async handleInput(msg) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+
+    try {
+      // Check if user is in a flow
+      if (!this.flowManager.isInFlow(userId)) {
+        return false;
+      }
+
+      // Continue the flow with user input
+      const result = await this.flowManager.continueFlow(userId, msg.text);
+      
+      // Handle flow response
+      if (result.response) {
+        await this.bot.sendMessage(chatId, result.response, {
+          parse_mode: 'Markdown',
+          reply_markup: result.keyboard
+        });
+      }
+
+      // Handle flow completion
+      if (result.completed) {
+        if (result.alert) {
+          await this.alertHandler.savePriceAlert(chatId, userId, result.alert);
+        }
+        await this.showPriceAlertsMenu(chatId, msg.from);
+      }
+
+      return true;
+    } catch (error) {
+      await ErrorHandler.handle(error, this.bot, chatId);
+      return false;
+    }
+  }
+
+  async handleCallback(query) {
+    const chatId = query.message.chat.id;
+    const action = query.data;
+
+    try {
+      // Check if callback is for flow
+      if (this.flowManager.isInFlow(query.from.id)) {
+        const result = await this.flowManager.handleCallback(query.from.id, action);
+        if (result.handled) return;
+      }
+
+      // Handle other callbacks
+      const handled = await this.eventHandler.emit(action, query);
+      if (!handled) {
+        console.warn(`Unhandled callback action: ${action}`);
+      }
     } catch (error) {
       await ErrorHandler.handle(error, this.bot, chatId);
     }
@@ -143,23 +192,6 @@ export class PriceAlertsCommand extends BaseCommand {
     } catch (error) {
       await ErrorHandler.handle(error, this.bot, chatId);
     }
-  }
-
-  async handleInput(msg) {
-    const chatId = msg.chat.id;
-    const state = await this.getState(msg.from.id);
-
-    if (state === USER_STATES.WAITING_PRICE_ALERT && msg.text) {
-      try {
-        const pendingAlert = await this.alertHandler.handlePriceInput(chatId, msg.text, msg.from);
-        await this.setUserData(msg.from.id, { pendingAlert });
-        await this.showAlertConfirmation(chatId, msg.from);
-        return true;
-      } catch (error) {
-        await ErrorHandler.handle(error, this.bot, chatId);
-      }
-    }
-    return false;
   }
 
   async showAlertConfirmation(chatId, userInfo) {

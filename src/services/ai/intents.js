@@ -1,4 +1,21 @@
 export const TRADING_INTENTS = {
+  // Capability intents
+  LIST_CAPABILITIES: 'LIST_CAPABILITIES',
+  SHOW_CAPABILITY: 'SHOW_CAPABILITY',
+  DISCUSS_FEATURE: 'DISCUSS_FEATURE',
+  
+  // System intents
+  SYSTEM_METRICS: 'SYSTEM_METRICS',
+  USER_DATA: 'USER_DATA',
+  INTERNET_SEARCH: 'INTERNET_SEARCH',
+
+  // Address Book Intents
+  SAVE_ADDRESS: 'SAVE_ADDRESS',
+  GET_ADDRESS: 'GET_ADDRESS',
+  LIST_ADDRESSES: 'LIST_ADDRESSES',
+  UPDATE_ADDRESS: 'UPDATE_ADDRESS',
+  DELETE_ADDRESS: 'DELETE_ADDRESS',
+  SEARCH_ADDRESSES: 'SEARCH_ADDRESSES',
   
   // Chat History & Context
   CHAT_HISTORY: 'CHAT_HISTORY',
@@ -60,12 +77,69 @@ export const TRADING_INTENTS = {
   SAVE_STRATEGY: 'SAVE_STRATEGY',
   GET_STRATEGIES: 'GET_STRATEGIES',
 
+  // KOL Monitoring
+  KOL_MONITOR_SETUP: 'KOL_MONITOR_SETUP',
+  KOL_MONITOR_LIST: 'KOL_MONITOR_LIST', 
+  KOL_MONITOR_STOP: 'KOL_MONITOR_STOP',
+  
+  // Multi-target Orders
+  MULTI_TARGET_ORDER: 'MULTI_TARGET_ORDER',
+  MULTI_TARGET_STATUS: 'MULTI_TARGET_STATUS',
+  MULTI_TARGET_CANCEL: 'MULTI_TARGET_CANCEL',
+
   // Greeting intent
   CHAT: 'CHAT',
   GREETING: 'GREETING',
 };
 
 export const INTENT_PATTERNS = {
+  [TRADING_INTENTS.LIST_CAPABILITIES]: [
+    'what can you do',
+    'list capabilities',
+    'show features',
+    'your abilities',
+    'what are you capable of'
+  ],
+
+  [TRADING_INTENTS.SHOW_CAPABILITY]: [
+    'show me',
+    'demonstrate',
+    'showcase',
+    'example of',
+    'do a demo'
+  ],
+
+  [TRADING_INTENTS.DISCUSS_FEATURE]: [
+    'tell me about your',
+    'explain feature',
+    'how does your',
+    'details about',
+    'how do you work',
+    'your features',
+    'your functions'
+  ],
+
+  [TRADING_INTENTS.SYSTEM_METRICS]: [
+    'system status',
+    'health check',
+    'performance',
+    'metrics'
+  ],
+
+  [TRADING_INTENTS.USER_DATA]: [
+    'my data',
+    'my profile',
+    'my settings',
+    'my stats'
+  ],
+
+  [TRADING_INTENTS.INTERNET_SEARCH]: [
+    'search for',
+    'find info about',
+    'look up',
+    'search the web'
+  ],
+
   [TRADING_INTENTS.CHAT_HISTORY]: [
     'show chat history',
     'show conversation',
@@ -83,6 +157,49 @@ export const INTENT_PATTERNS = {
     'conversation summary'
   ],
 
+  // Address Book Patterns
+  [TRADING_INTENTS.SAVE_ADDRESS]: [
+    'save address',
+    'store address',
+    'remember address',
+    'add address',
+    'save token',
+    'save wallet'
+  ],
+
+  [TRADING_INTENTS.GET_ADDRESS]: [
+    'get address',
+    'show address',
+    'find address',
+    'lookup address'
+  ],
+
+  [TRADING_INTENTS.LIST_ADDRESSES]: [
+    'list addresses',
+    'show addresses',
+    'my addresses',
+    'saved addresses'
+  ],
+
+  [TRADING_INTENTS.UPDATE_ADDRESS]: [
+    'update address',
+    'change address',
+    'edit address',
+    'modify address'
+  ],
+
+  [TRADING_INTENTS.DELETE_ADDRESS]: [
+    'delete address',
+    'remove address',
+    'forget address'
+  ],
+
+  [TRADING_INTENTS.SEARCH_ADDRESSES]: [
+    'search addresses',
+    'find addresses',
+    'lookup addresses'
+  ],
+
   [TRADING_INTENTS.CONTEXT_RECALL]: [
     'remember',
     'recall',
@@ -98,7 +215,7 @@ export const INTENT_PATTERNS = {
     'from earlier',
     'previously mentioned'
   ],
-  
+
   [TRADING_INTENTS.PRODUCT_SEARCH]: [
     'shop',
     'buy product',
@@ -338,6 +455,53 @@ export const INTENT_PATTERNS = {
     'store strategy',
     'remember strategy',
     'add trading plan'
+  ],
+
+  // KOL X Copy Trading
+  [TRADING_INTENTS.KOL_MONITOR_SETUP]: [
+    'monitor kol',
+    'track trader',
+    'follow trader',
+    'copy trades from',
+    'monitor twitter',
+    'copy kol',
+    'auto copy'
+  ],
+
+  [TRADING_INTENTS.KOL_MONITOR_LIST]: [
+    'list kol',
+    'show monitored',
+    'tracked traders',
+    'active monitors'
+  ],
+
+  [TRADING_INTENTS.KOL_MONITOR_STOP]: [
+    'stop monitoring',
+    'stop tracking',
+    'remove kol',
+    'unfollow trader'
+  ],
+
+  // Multi Target Orders
+  [TRADING_INTENTS.MULTI_TARGET_ORDER]: [
+    'sell at multiple',
+    'multi target',
+    'split sell',
+    'sell portions',
+    'staged exit',
+    'sell % at'
+  ],
+
+  [TRADING_INTENTS.MULTI_TARGET_STATUS]: [
+    'multi target status',
+    'check splits',
+    'target progress'
+  ],
+
+  [TRADING_INTENTS.MULTI_TARGET_CANCEL]: [
+    'cancel split',
+    'stop multi target',
+    'cancel targets'
   ],
 
   //Greeting Patterns

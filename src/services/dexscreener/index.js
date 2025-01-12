@@ -1,9 +1,15 @@
+// src/services/dexscreener/index.js
 import axios from 'axios';
 import { cacheService } from '../cache/CacheService.js';
 import { ErrorHandler } from '../../core/errors/index.js';
+import { rateLimiter } from '../../core/rate-limiting/RateLimiter.js';
 
-const CACHE_DURATION = 6000; // 1 minute cache
-const BASE_URL = 'https://api.dexscreener.com';
+const BASE_URL = 'https://api.dexscreener.com/latest';
+const CACHE_DURATION = 60000; // 1 minute
+const RATE_LIMIT = {
+  windowMs: 60000,
+  maxRequests: 60
+};
 
 class DexScreenerService {
   constructor() {
@@ -14,77 +20,117 @@ class DexScreenerService {
         'Accept': 'application/json'
       }
     });
+    
+    // Add response interceptor for error handling
+    this.api.interceptors.response.use(
+      response => response,
+      error => this.handleApiError(error)
+    );
   }
 
   async fetchWithCache(endpoint, params = {}, cacheKey) {
+    // Check rate limits first
+    const isLimited = await rateLimiter.isRateLimited('dexscreener', endpoint);
+    if (isLimited) {
+      throw new Error('Rate limit exceeded');
+    }
+
+    // Check cache
     const cached = await cacheService.get(cacheKey);
     if (cached) return cached;
 
     try {
-      console.log(`🔄 Fetching from ${endpoint}`);
       const response = await this.api.get(endpoint, { params });
       const data = response.data;
 
+      // Cache valid responses
       await cacheService.set(cacheKey, data, CACHE_DURATION);
       return data;
     } catch (error) {
-      console.error(`❌ DexScreener API error (${endpoint}):`, error.message);
+      await ErrorHandler.handle(error);
       throw error;
     }
   }
 
-  async getTrendingPairs() {
-    return this.fetchWithCache('/dex/pairs/trending', {}, 'dexscreener:trending');
-  }
-
-  async getBoostedPairs() {
-    return this.fetchWithCache('/token-boosts/latest/v1', {}, 'dexscreener:boosted');
-  }
-
-  async getTopBoostedPairs() {
-    return this.fetchWithCache('/token-boosts/top/v1', {}, 'dexscreener:topBoosted');
-  }
-
+  // Proper endpoint implementations based on docs
   async getPairsByChainAndPair(chainId, pairId) {
-    return this.fetchWithCache(`/dex/pairs/${chainId}/${pairId}`, {}, `dexscreener:pairs:${chainId}:${pairId}`);
+    return this.fetchWithCache(
+      `/pairs/${chainId}/${pairId}`,
+      {},
+      `dexscreener:pairs:${chainId}:${pairId}`
+    );
   }
 
-  async getPairsByToken(tokenAddresses) {
+  async searchPairs(query) {
+    return this.fetchWithCache(
+      `/search/pairs`,
+      { query },
+      `dexscreener:search:${query}`
+    );
+  }
+
+  async getTokenPairs(tokenAddresses) {
     if (!Array.isArray(tokenAddresses)) {
       tokenAddresses = [tokenAddresses];
     }
-    return this.fetchWithCache(`/dex/tokens/${tokenAddresses.join(',')}`, {}, `dexscreener:tokens:${tokenAddresses.join('-')}`);
+    return this.fetchWithCache(
+      `/tokens/${tokenAddresses.join(',')}`,
+      {},
+      `dexscreener:tokens:${tokenAddresses.join('-')}`
+    );
   }
 
-  formatPair(pair) {
+  // Improved error handling
+  async handleApiError(error) {
+    const errorData = {
+      status: error.response?.status,
+      message: error.response?.data?.error || error.message,
+      endpoint: error.config?.url
+    };
+
+    // Log error
+    console.error('DexScreener API error:', errorData);
+
+    // Handle specific error cases
+    switch (errorData.status) {
+      case 429:
+        throw new Error('DexScreener rate limit exceeded');
+      case 404:
+        throw new Error('Pair or token not found');
+      default:
+        throw new Error(`DexScreener API error: ${errorData.message}`);
+    }
+  }
+
+  // Proper result formatting
+  formatPairData(pair) {
     if (!pair) return null;
 
     return {
       chainId: pair.chainId,
-      tokenAddress: pair.baseToken?.address,
-      symbol: pair.baseToken?.symbol,
-      name: pair.baseToken?.name,
+      dexId: pair.dexId,
+      pairAddress: pair.pairAddress,
+      baseToken: {
+        address: pair.baseToken.address,
+        name: pair.baseToken.name,
+        symbol: pair.baseToken.symbol
+      },
       priceUsd: pair.priceUsd,
-      volume24h: pair.volume?.h24,
-      liquidity: pair.liquidity?.usd,
-      url: pair.url,
-      description: pair.description,
-      icon: pair.icon,
-      links: pair.links,
-      metrics: {
-        fdv: pair.fdv,
-        pairCreatedAt: pair.pairCreatedAt,
-        priceChange24h: pair.priceChange?.h24,
-        txns24h: {
-          buys: pair.txns?.h24?.buys || 0,
-          sells: pair.txns?.h24?.sells || 0
-        }
+      priceChange: {
+        h1: pair.priceChange.h1,
+        h24: pair.priceChange.h24
+      },
+      liquidity: {
+        usd: pair.liquidity.usd,
+        base: pair.liquidity.base,
+        quote: pair.liquidity.quote
+      },
+      volume: {
+        h24: pair.volume.h24,
+        h6: pair.volume.h6,
+        h1: pair.volume.h1
       }
     };
-  }
-
-  cleanup() {
-    // Nothing to clean up
   }
 }
 

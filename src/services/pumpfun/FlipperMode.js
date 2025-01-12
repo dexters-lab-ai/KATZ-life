@@ -5,7 +5,7 @@ import { monitoringSystem } from '../../core/monitoring/Monitor.js';
 import { circuitBreakers } from '../../core/circuit-breaker/index.js';
 import { BREAKER_CONFIGS } from '../../core/circuit-breaker/index.js';
 import { User } from '../../models/User.js';
-import { dextools } from '../dextools/index.js';
+import { tokenInfoService } from '../tokens/TokenInfoService.js';
 import { walletService } from '../../services/wallet/index.js';
 import { transactionQueue } from '../queue/TransactionQueue.js';
 import { db } from '../../core/database.js';
@@ -16,6 +16,13 @@ import { EnhancedPositionMonitor } from '../../services/queue/enhanced/PositionM
 import { retryManager } from '../queue/RetryManager.js';
 import { PositionMonitor } from '../quicknode/PositionMonitor.js';
 import { errorRecoverySystem } from '../errors/ErrorRecoverySystem.js';
+
+import { learningSystem } from '../ai/flows/learning/LearningSystem.js';
+import { strategyOptimizer } from '../ai/flows/learning/StrategyOptimizer.js';
+import { patternRecognizer } from '../ai/flows/learning/PatternRecognition.js';
+import { userLearningSystem } from '../ai/flows/learning/UserLearningSystem.js';
+import { kolLearningSystem } from '../ai/flows/learning/KOLLearningSystem.js';
+import { strategyManager } from '../ai/flows/learning/StrategyManager.js';
 
 class FlipperMode extends EventEmitter {
   constructor() {
@@ -53,6 +60,18 @@ class FlipperMode extends EventEmitter {
       gasBuffer: 0.01, // SOL
       buyAmount: 0.1, // SOL per trade
     };
+
+    // Learning system integrations
+    this.learningSystem = learningSystem;
+    this.strategyOptimizer = strategyOptimizer;
+    this.patternRecognizer = patternRecognizer;
+    this.userLearning = userLearningSystem;
+    this.kolLearning = kolLearningSystem;
+    this.strategyManager = strategyManager;
+
+    // Strategy tracking
+    this.activeStrategies = new Map();
+    this.strategyPerformance = new Map();
 
     // Runtime state
     this.isRunning = false;
@@ -131,6 +150,67 @@ class FlipperMode extends EventEmitter {
     }, 600000); // Snapshot every hour
   }
 
+  async optimizeStrategy(userId) {
+    try {
+      // Get user preferences and history
+      const preferences = await this.userLearning.getUserPreferences(userId);
+      const tradeHistory = Array.from(this.positionStats.values());
+      
+      // Analyze patterns
+      const patterns = await this.patternRecognizer.analyzePatterns(tradeHistory);
+      
+      // Get KOL patterns
+      const kolPatterns = await this.kolLearning.getTopPatterns();
+      
+      // Get top performing strategies
+      const topStrategies = await this.strategyManager.getTopStrategies(userId);
+
+      // Generate optimized strategy
+      const optimizedStrategy = await this.strategyOptimizer.optimizeStrategy({
+        currentStrategy: this.config,
+        preferences,
+        patterns,
+        kolPatterns,
+        topStrategies
+      });
+
+      return optimizedStrategy;
+    } catch (error) {
+      await ErrorHandler.handle(error);
+      throw error;
+    }
+  }
+
+  async updateStrategyPerformance(userId, performance) {
+    const tracking = this.strategyPerformance.get(userId);
+    if (!tracking) return;
+
+    try {
+      // Update strategy performance
+      await this.strategyManager.updateStrategyPerformance(
+        tracking.strategyId,
+        performance
+      );
+
+      // Update tracking metrics
+      tracking.trades++;
+      tracking.profit += performance.profit;
+
+      // Check if optimization is needed (every 10 trades)
+      if (tracking.trades % 10 === 0) {
+        const optimizedStrategy = await this.optimizeStrategy(userId);
+        
+        // Emit optimization proposal
+        this.emit('strategyOptimization', {
+          userId,
+          proposal: optimizedStrategy
+        });
+      }
+    } catch (error) {
+      await ErrorHandler.handle(error);
+    }
+  }
+
   async start(userId, walletAddress, customConfig = {}) {
     // Ensure the class is initialized before starting
     if (!this.initialized) {
@@ -146,6 +226,23 @@ class FlipperMode extends EventEmitter {
         }
 
         try {
+          // Create named strategy
+          const strategy = await this.strategyManager.createStrategy(userId, {
+            ...this.config,
+            ...customConfig
+          });
+
+          // Store active strategy
+          this.activeStrategies.set(userId, strategy);
+
+          // Start performance tracking
+          this.strategyPerformance.set(userId, {
+            strategyId: strategy._id,
+            startTime: Date.now(),
+            trades: 0,
+            profit: 0
+          });
+
           console.log('Starting FlipperMode...');
           const wallet = await walletService.getWallet(userId, walletAddress);
 
@@ -195,15 +292,29 @@ class FlipperMode extends EventEmitter {
       
       // Set up monitoring for each position
       for (const position of positions) {
+        // Subscribe to price updates using tokenInfoService
+        const subscription = await tokenInfoService.subscribeToPriceUpdates(
+          position.token.network || 'solana', // Default to solana if not specified
+          position.token.address,
+          (price) => this.updatePosition(position.token.address, price)
+        );
+  
+        // Store subscription for cleanup
+        this.priceWebsockets.set(position.token.address, subscription);
+  
+        // Set up redundant price feeds as backup
         await this.positionMonitor.setupRedundantPriceFeeds({
           address: position.token.address,
           ...position.token
         });
       }
   
-      // Listen for price updates
+      // Listen for price updates from backup feeds
       this.positionMonitor.on('priceUpdate', ({ tokenAddress, price, updates }) => {
-        this.updatePosition(tokenAddress, price);
+        // Only use backup price if primary feed fails
+        if (!this.priceWebsockets.get(tokenAddress)?.isActive) {
+          this.updatePosition(tokenAddress, price);
+        }
       });
   
       console.log('✅ Price monitoring setup complete');
@@ -211,8 +322,7 @@ class FlipperMode extends EventEmitter {
       console.error('Error setting up price monitoring:', error);
       throw error;
     }
-  }
-  
+  }  
   
   async stop(bot, userId) {
     return circuitBreakers.executeWithBreaker(
@@ -621,6 +731,12 @@ class FlipperMode extends EventEmitter {
             amount: position.amount,
             priority: 2, // Higher priority for exits
           });
+
+          // Update strategy performance
+          await this.updateStrategyPerformance(position.userId, {
+            profit: result.profit,
+            maxDrawdown: position.maxDrawdown
+          });
   
           // Update position stats
           const stats = this.positionStats.get(tokenAddress);
@@ -727,6 +843,68 @@ class FlipperMode extends EventEmitter {
         message: 'Failed to save system metrics',
         error,
       });
+    }
+  }
+
+  // Add new method for updating strategy performance
+  async updateStrategyPerformance(userId, performance) {
+    const tracking = this.strategyPerformance.get(userId);
+    if (!tracking) return;
+
+    try {
+      // Update strategy performance
+      await this.strategyManager.updateStrategyPerformance(
+        tracking.strategyId,
+        performance
+      );
+
+      // Update tracking metrics
+      tracking.trades++;
+      tracking.profit += performance.profit;
+
+      // Check if optimization is needed (every 10 trades)
+      if (tracking.trades % 10 === 0) {
+        const proposal = await this.optimizeStrategy(userId);
+        
+        // Emit optimization proposal
+        this.emit('strategyOptimization', {
+          userId,
+          proposal
+        });
+      }
+    } catch (error) {
+      await ErrorHandler.handle(error);
+    }
+  }
+
+  // Add method to apply strategy changes
+  async applyStrategyChanges(userId, changes) {
+    try {
+      const tracking = this.strategyPerformance.get(userId);
+      if (!tracking) throw new Error('No active strategy found');
+
+      // Apply changes through strategy manager
+      const updatedStrategy = await this.strategyManager.applyStrategyChanges(
+        tracking.strategyId,
+        changes
+      );
+
+      // Update config
+      this.config = {
+        ...this.config,
+        ...updatedStrategy.config
+      };
+
+      // Emit update event
+      this.emit('strategyUpdated', {
+        userId,
+        strategy: updatedStrategy
+      });
+
+      return updatedStrategy;
+    } catch (error) {
+      await ErrorHandler.handle(error);
+      throw error;
     }
   }
 

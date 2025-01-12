@@ -1,5 +1,6 @@
 import { walletService } from '../wallet/index.js';
 import { tokenService } from '../wallet/TokenService.js';
+import { tokenInfoService } from '../tokens/TokenInfoService.js';
 import { gasEstimationService } from '../gas/GasEstimationService.js';
 import { tokenApprovalService } from '../tokens/TokenApprovalService.js';
 import { quickNodeService } from '../quicknode/QuickNodeService.js';

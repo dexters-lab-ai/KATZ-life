@@ -1,12 +1,35 @@
 import { EventEmitter } from 'events';
 import { openAIService } from './openai.js';
 import { ErrorHandler } from '../../core/errors/index.js';
+import { contextManager } from './ContextManager.js';
+import { db } from '../../core/database.js';
 
 export class ConversationManager extends EventEmitter {
   constructor() {
     super();
     this.conversations = new Map();
     this.states = new Map();
+    this.initialized = false;
+    this.flowCollection = null;
+  }
+
+  async initialize() {
+    if (this.initialized) return;
+    try {
+      await db.connect();
+      this.flowCollection = db.getDatabase().collection('conversationFlows');
+      await this.setupIndexes();
+      this.initialized = true;
+      console.log('✅ ConversationManager initialized');
+    } catch (error) {
+      console.error('❌ Error initializing ConversationManager:', error);
+      throw error;
+    }
+  }
+
+  async setupIndexes() {
+    await this.flowCollection.createIndex({ userId: 1 });
+    await this.flowCollection.createIndex({ updatedAt: 1 }, { expireAfterSeconds: 3600 }); // 1 hour
   }
 
   async handleMessage(userId, text, context = []) {
@@ -22,12 +45,14 @@ export class ConversationManager extends EventEmitter {
       // Generate chat response
       const response = await this.generateChatResponse(text, context);
       
-      // Update conversation state
+      // Update conversation state and context
       this.updateConversationState(userId, {
         lastMessage: text,
         lastResponse: response,
         timestamp: Date.now()
       });
+
+      await contextManager.updateContext(userId, text, response);
 
       return {
         type: 'chat',
@@ -72,12 +97,19 @@ export class ConversationManager extends EventEmitter {
     return this.states.get(userId);
   }
 
-  updateConversationState(userId, updates) {
+  async updateConversationState(userId, updates) {
     const current = this.getConversationState(userId);
-    this.states.set(userId, {
+    const updatedState = {
       ...current,
       ...updates
-    });
+    };
+    
+    this.states.set(userId, updatedState);
+
+    // Persist flow state if in active flow
+    if (updatedState.activeFlow) {
+      await this.persistFlowState(userId, updatedState);
+    }
   }
 
   async continueFlow(userId, text, state) {
@@ -88,15 +120,22 @@ export class ConversationManager extends EventEmitter {
       const response = await this.processFlowStep(flow, flowData, text);
       
       if (response.completed) {
-        this.updateConversationState(userId, {
+        await this.updateConversationState(userId, {
           activeFlow: null,
           flowData: null
         });
       } else {
-        this.updateConversationState(userId, {
+        await this.updateConversationState(userId, {
           flowData: response.flowData
         });
       }
+
+      // Update context with flow interaction
+      await contextManager.updateContext(userId, {
+        type: 'flow',
+        flow,
+        input: text
+      }, response);
 
       return response;
     } catch (error) {
@@ -117,9 +156,41 @@ export class ConversationManager extends EventEmitter {
     }
   }
 
+  async persistFlowState(userId, state) {
+    try {
+      await this.flowCollection.updateOne(
+        { userId },
+        { 
+          $set: {
+            state,
+            updatedAt: new Date()
+          }
+        },
+        { upsert: true }
+      );
+    } catch (error) {
+      await ErrorHandler.handle(error);
+    }
+  }
+
+  async restoreFlowState(userId) {
+    try {
+      const saved = await this.flowCollection.findOne({ userId });
+      if (saved?.state) {
+        this.states.set(userId, saved.state);
+      }
+    } catch (error) {
+      await ErrorHandler.handle(error);
+    }
+  }
+
   cleanup() {
     this.conversations.clear();
     this.states.clear();
     this.removeAllListeners();
+    this.initialized = false;
+    console.log('✅ ConversationManager cleaned up');
   }
 }
+
+export const conversationManager = new ConversationManager();

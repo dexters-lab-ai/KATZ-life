@@ -1,8 +1,10 @@
+import { BaseFlow } from './BaseFlow.js';
 import { EventEmitter } from 'events';
 import { priceAlertService } from '../../priceAlerts.js';
+import { tokenInfoService } from '../../tokens/TokenInfoService.js';
 import { ErrorHandler } from '../../../core/errors/index.js';
 
-export class AlertFlow extends EventEmitter {
+export class AlertFlow extends BaseFlow {
   constructor() {
     super();
     this.steps = ['token', 'price', 'action', 'confirmation'];
@@ -31,9 +33,15 @@ export class AlertFlow extends EventEmitter {
   }
 
   async processTokenStep(input) {
-    // Validate token
-    const tokenInfo = await walletService.validateToken(input);
+    const tokenInfo = await tokenInfoService.getTokenInfo(
+      this.network,
+      input.trim()
+    );
     
+    if (!tokenInfo) {
+      throw new Error('Invalid token');
+    }
+  
     return {
       completed: false,
       nextStep: 'price',
