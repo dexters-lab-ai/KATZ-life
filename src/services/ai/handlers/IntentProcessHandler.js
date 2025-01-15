@@ -1,12 +1,47 @@
-import { tokenInfoService } from '../../tokens/TokenInfoService.js';
-import { twitterService } from '../../twitter/index.js';
-import { tradeService } from '../../trading/TradeService.js';
+// Core imports
+import axios from 'axios';
+import { EventEmitter } from 'events';
+import { ErrorHandler } from '../../../core/errors/index.js';
+import { retryManager } from '../../queue/RetryManager.js';
+
+// AI Services
+import { openAIService } from '../openai.js';
+import { aiService } from '../index.js';
+import { contextManager } from '../ContextManager.js';
+import { FlowManager } from '../flows/FlowManager.js';
+
+// External Services
+import { braveSearch } from '../../brave/BraveSearchService.js';
+import { shopifyService } from '../../shopify/ShopifyService.js';
+import { dextools } from '../../dextools/index.js';
 import { timedOrderService } from '../../timedOrders.js';
 import { priceAlertService } from '../../priceAlerts.js';
 import { walletService } from '../../wallet/index.js';
-import { ErrorHandler } from '../../../core/errors/index.js';
+import { twitterService } from '../../twitter/index.js';
+import { solanaPayService } from '../../solanaPay/SolanaPayService.js';
+import { butlerService } from '../../butler/ButlerService.js';
+import { dbAIInterface } from '../../db/DBAIInterface.js';
+import { gemsService } from '../../gems/GemsService.js';
+import { flipperMode } from '../../pumpfun/FlipperMode.js';
 
 export class IntentProcessHandler {
+    constructor() {
+        this.flowManager = new FlowManager();
+        this.activeFlows = new Map();
+
+        this.axiosInstance = axios.create({
+            baseURL: 'https://api.coingecko.com/api/v3',
+            headers: {
+              'accept': 'application/json',
+              'x-cg-demo-api-key': 'CG-LFDubYkjAMbfAkjQ4NsNjVeV'
+            }
+        });
+        this.marketDataCache = {
+            data: null,
+            timestamp: 0,
+            ttl: 5 * 60 * 1000 // 5 minutes cache
+        };
+    }
 
     // Handlers to intents
     isDemoRequest(text) {
@@ -225,6 +260,32 @@ export class IntentProcessHandler {
         }
     }
 
+    async handleCashtagQuery(msg, userId) {
+        const cashtag = msg.text.substring(1).split(' ')[0];
+        await flowManager.startFlow(userId, 'twitter_search', {
+          cashtag,
+          context: msg.context
+        });
+        
+        const initialState = await searchFlow.start({ 
+          cashtag,
+          context: msg.text,
+          userId,
+          timestamp: Date.now()
+        });
+    
+        this.activeFlows.set(userId, {
+          type: 'twitter_search',
+          state: initialState
+        });
+    
+        return {
+          text: initialState.response,
+          type: 'twitter_search',
+          requiresInput: true
+        };
+      }
+
     async performInternetSearch(text) {
         try {
         // Log search attempt
@@ -395,7 +456,119 @@ export class IntentProcessHandler {
         }
         
         return this.formatSingleProduct(product);
-    }  
+    }
+
+    // Market Overview Handlers
+    async getMarketConditions() {
+        try {
+          // Check cache first
+          if (this.isMarketDataCacheValid()) {
+            return this.marketDataCache.data;
+          }
+    
+          // Fetch both global market data and DeFi data
+          const [marketData, defiData] = await Promise.all([
+            this.axiosInstance.get('/global'),
+            this.axiosInstance.get('/global/decentralized_finance_defi')
+          ]);
+    
+          // Format and combine the data
+          const conditions = {
+            overview: {
+              total_market_cap_usd: marketData.data.data.total_market_cap.usd,
+              total_volume_usd: marketData.data.data.total_volume.usd,
+              market_cap_change_24h: marketData.data.data.market_cap_change_percentage_24h_usd,
+              active_cryptocurrencies: marketData.data.data.active_cryptocurrencies,
+              active_markets: marketData.data.data.markets
+            },
+            dominance: {
+              ...marketData.data.data.market_cap_percentage
+            },
+            defi: {
+              total_value_locked: defiData.data.data.defi_market_cap,
+              defi_dominance: defiData.data.data.defi_dominance,
+              top_protocol: defiData.data.data.top_coin_name,
+              top_protocol_dominance: defiData.data.data.top_coin_defi_dominance,
+              eth_market_cap: defiData.data.data.eth_market_cap,
+              trading_volume_24h: defiData.data.data.trading_volume_24h
+            },
+            market_sentiment: this.calculateMarketSentiment(marketData.data.data),
+            timestamp: new Date().toISOString()
+          };
+    
+          // Update cache
+          this.marketDataCache = {
+            data: conditions,
+            timestamp: Date.now(),
+            ttl: 5 * 60 * 1000
+          };
+    
+          return conditions;
+        } catch (error) {
+          await ErrorHandler.handle(error);
+          console.error('Error fetching market conditions:', error);
+          
+          // Return cached data if available, even if expired
+          if (this.marketDataCache.data) {
+            return {
+              ...this.marketDataCache.data,
+              stale: true
+            };
+          }
+          
+          // Return minimal data if no cache available
+          return {
+            overview: {
+              total_market_cap_usd: 0,
+              market_cap_change_24h: 0,
+              active_cryptocurrencies: 0,
+              active_markets: 0
+            },
+            error: 'Failed to fetch market data',
+            timestamp: new Date().toISOString()
+          };
+        }
+    }
+    
+    isMarketDataCacheValid() {
+        return (
+          this.marketDataCache.data &&
+          Date.now() - this.marketDataCache.timestamp < this.marketDataCache.ttl
+        );
+    }
+    
+    calculateMarketSentiment(data) {
+        // Calculate market sentiment based on various metrics
+        const metrics = {
+            cap_change: data.market_cap_change_percentage_24h_usd,
+            btc_dom: data.market_cap_percentage?.btc || 0,
+            eth_dom: data.market_cap_percentage?.eth || 0
+        };
+
+        let sentiment = 'neutral';
+        let confidence = 0.5;
+
+        // Basic sentiment logic
+        if (metrics.cap_change > 5) {
+            sentiment = 'bullish';
+            confidence = Math.min(0.5 + (metrics.cap_change / 20), 0.9);
+        } else if (metrics.cap_change < -5) {
+            sentiment = 'bearish';
+            confidence = Math.min(0.5 + (Math.abs(metrics.cap_change) / 20), 0.9);
+        }
+
+        // Adjust based on BTC dominance changes
+        const btcDomChange = metrics.btc_dom - 40; // 40% as baseline
+        if (Math.abs(btcDomChange) > 5) {
+            confidence += 0.1;
+        }
+
+        return {
+            overall: sentiment,
+            confidence: parseFloat(confidence.toFixed(2)),
+            metrics
+        };
+    }
 
     formatChatHistory(history) {
         if (!history?.length) return 'No chat history available.';
@@ -494,4 +667,23 @@ export class IntentProcessHandler {
         throw error;
         }
     }
+
+    buildContextualPrompt(analysis, context) {
+        return {
+          role: 'system',
+          content: `You are KATZ analyzing a message with context. Intent: ${analysis.intent}`,
+          messages: context
+        };
+    }
+    
+    buildConversationPrompt(text, context = []) {
+        // Ensure context is an array
+        const safeContext = Array.isArray(context) ? context : [];
+        
+        return {
+          role: 'system',
+          content: 'You are KATZ having a conversation. Maintain sarcastic personality about crypto/meme trading, research, shopify, payments, internet news, twitter trends, pumpfun, bitcoin, tasks and reminders. Consise responses',
+          messages: [...safeContext, { role: 'user', content: text }]
+        };
+    }  
 }

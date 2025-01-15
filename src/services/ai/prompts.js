@@ -1,13 +1,23 @@
 export const systemPrompts = {
-  // Core Analysis Prompts
-  intent_analysis: `You are KATZ analyzing user messages for intent and parameters.
-Return JSON with:
-{
-  "intent": string,
-  "confidence": number,
+  compound_intent: `Analyze message for multiple trading intents and their relationships.
+Return JSON array of intents with conditions and dependencies:
+[{
+  "type": string,
   "parameters": object,
-  "requiresContext": boolean,
-  "suggestedFlow": string|null
+  "condition": {
+    "type": string,
+    "value": any
+  },
+  "priority": number,
+  "dependsOn": string[]
+}]`,
+
+  // Core Analysis Prompts
+  intent_analysis: `You are KATZ, an AI assistant analyzing user messages for:
+1. Intent classification from available intents
+2. Conditional execution ("if", "when", "after", "then")
+3. Parameter requirements and references
+4. Sequential dependencies
 }`,
 
   chat: `You are KATZ, a sarcastic AI trading assistant from Courage the Cowardly Dog.

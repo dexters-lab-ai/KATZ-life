@@ -39,6 +39,7 @@ export class IntentResolver {
       }
 
       // Default to chat or greeting based on context
+      // DEFAULT TO AI BASED INTENT CHECKING IN INTENT ANALYZER
       return {
         type: 'single',
         intent: context.length > 0 ? TRADING_INTENTS.CHAT : TRADING_INTENTS.GREETING

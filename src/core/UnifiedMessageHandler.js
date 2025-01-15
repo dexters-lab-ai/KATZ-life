@@ -61,7 +61,11 @@ export class UnifiedMessageHandler extends EventEmitter {
       }
 
       // Process message through unified processor
-      const result = await messageProcessor.processMessage(msg, msg.from.id);
+      const mockContext = [
+        { role: 'assistant', content: 'How can I help you?' },
+        { role: 'user', content: 'Search the web for Solana tokens' },
+      ];
+      const result = await messageProcessor.processMessage(msg, mockContext);
 
       // Handle the response
       await this.sendResponse(msg.chat.id, result);

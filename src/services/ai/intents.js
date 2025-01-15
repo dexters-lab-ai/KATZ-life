@@ -92,6 +92,51 @@ export const TRADING_INTENTS = {
   GREETING: 'GREETING',
 };
 
+export const INTENT_SAMPLES = {
+  [TRADING_INTENTS.PRICE_ALERT]: {
+    patterns: ['alert me', 'set alert', 'price alert', 'notify me'],
+    examples: [
+      'Set a price alert for $BOK when it doubles in value.',
+      'Notify me when $ETH drops below $1500.',
+      'I want an alert when Bitcoin hits $30,000.'
+    ],
+  },
+  [TRADING_INTENTS.INTERNET_SEARCH]: {
+    patterns: ['search for', 'find', 'look up', 'google'],
+    examples: [
+      'Search the internet for Ethereum price predictions.',
+      'Look up the latest news on $DOGE.',
+      'Find information about Solana blockchain upgrades.'
+    ],
+  },
+  [TRADING_INTENTS.SWAP_TOKEN]: {
+    patterns: ['swap', 'exchange', 'convert', 'trade'],
+    examples: [
+      'Swap 1 ETH for USDT.',
+      'Convert 50 USDT to SOL.',
+      'Exchange $BTC for $BNB worth $100.',
+    ],
+  },
+  [TRADING_INTENTS.TIMED_ORDER]: {
+    patterns: ['schedule trade', 'buy at', 'sell at', 'set order'],
+    examples: [
+      'Schedule a buy order for 1 ETH when the price drops to $1200.',
+      'Set an order to sell $DOGE at $0.5.',
+      'Buy $ADA if it dips below $1 by tomorrow.',
+    ],
+  },
+  [TRADING_INTENTS.MARKET_ANALYSIS]: {
+    patterns: ['analyze market', 'market overview', 'token trends'],
+    examples: [
+      'Give me a market analysis for Solana.',
+      'What are the current token trends for Ethereum?',
+      'Check market overview for top crypto tokens.'
+    ],
+  },
+  // Add more intents as needed
+};
+
+
 export const INTENT_PATTERNS = {
   [TRADING_INTENTS.LIST_CAPABILITIES]: [
     'what can you do',

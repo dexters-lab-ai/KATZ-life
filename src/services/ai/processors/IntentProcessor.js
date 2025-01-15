@@ -1,128 +1,190 @@
-/*  ====================================================================
-
-        DEPRECATED 7 jAN 2025 in favor of UnifiedMessageProcessor
-
-    ==================================================================  */
-
-import { TRADING_INTENTS } from '../intents.js';
-import { dextools } from '../../dextools/index.js';
-import { timedOrderService } from '../../timedOrders.js';
-import { priceAlertService } from '../../priceAlerts.js';
-import { walletService } from '../../wallet/index.js';
+import { EventEmitter } from 'events';
 import { networkState } from '../../networkState.js';
+import { ErrorHandler } from '../../../core/errors/index.js';
+import { TRADING_INTENTS } from '../intents.js';
+import { IntentProcessHandler } from '../handlers/IntentProcessHandler.js';
+import { validateParameters, getParameterConfig, formatParameters } from '../config/parameterConfig.js';
+
+// Service imports
+import { addressBookService } from '../../addressBook/AddressBookService.js';
+import { tradeService } from '../../trading/TradeService.js';
+import { dextools } from '../../dextools/index.js';
+import { trendingService } from '../../trending/TrendingService.js';
+import { gemsService } from '../../gems/GemsService.js';
 import { twitterService } from '../../twitter/index.js';
-import { shopifyService } from '../../shopify/ShopifyService.js';
+import { flipperMode } from '../../pumpfun/FlipperMode.js';
+import { priceAlertService } from '../../priceAlerts.js';
+import { timedOrderService } from '../../timedOrders.js';
+import { walletService } from '../../wallet/index.js';
+import { tokenApprovalService } from '../../tokens/TokenApprovalService.js';
 import { solanaPayService } from '../../solanaPay/SolanaPayService.js';
+import { shopifyService } from '../../shopify/ShopifyService.js';
 import { butlerService } from '../../butler/ButlerService.js';
 import { dbAIInterface } from '../../db/DBAIInterface.js';
-import { gemsService } from '../../gems/GemsService.js';
-import { flipperMode } from '../../pumpfun/FlipperMode.js';
-import { openAIService } from '../openai.js';
-import { gasEstimationService } from '../../gas/GasEstimationService.js';
-import { tokenApprovalService } from '../../tokens/TokenApprovalService.js';
 import { contextManager } from '../ContextManager.js';
-import { ErrorHandler } from '../../../core/errors/index.js';
-import { config } from '../../../core/config.js';
-import axios from 'axios';
+import { aiService } from '../index.js';
 
-export class IntentProcessor {
+export class IntentProcessor extends EventEmitter {
   constructor() {
-    this.contextManager = contextManager;
+    super();
+    this.initialized = false;
+    this.intentProcessHandler = IntentProcessHandler;
   }
 
-  async processIntent(intent, text, userId, context) {
-    try {
-      
-      // If no intent provided, try to match one
-      if (!intent) {
-        const matchResult = await matchIntent(text);
-        if (matchResult) {
-          intent = matchResult.intent;
-          context = { ...context, ...matchResult.data };
-        }
-      }
-  
-      // Handle shopping intents first
-      if (intent === TRADING_INTENTS.PRODUCT_SEARCH || 
-          intent === TRADING_INTENTS.SHOPIFY_SEARCH) {
-        return this.handleShopifySearch(text);
-      }
+  async initialize() {
+    if (this.initialized) return;
 
-      const network = await networkState.getCurrentNetwork(userId);
+    try {
+      // Initialize required services
+      await Promise.all([
+        tradeService.initialize(),
+        shopifyService.initialize(),
+        solanaPayService.initialize(),
+        butlerService.initialize(),
+      ]);
+
+      this.initialized = true;
+      console.log('✅ IntentProcessor initialized');
+    } catch (error) {
+      console.error('❌ Error initializing IntentProcessor:', error);
+      throw error;
+    }
+  }
+
+  async executeIntent(intent, params) {
+    try {
+
+      // Format parameters before processing
+      const formattedParams = formatParameters(intent, params);
+      
+      // Update progress before execution
+      await this.updateProgress(formattedParams.userId, {
+        type: 'intent_start',
+        intent,
+        step: 1,
+        message: `Processing ${intent}...`
+      });
+  
+      // Execute the intent
+      const result = await this.processIntent(intent, formattedParams);
+  
+      // Update progress after completion 
+      await this.updateProgress(formattedParams.userId, {
+        type: 'intent_complete',
+        intent,
+        success: true,
+        message: `Completed ${intent}`
+      });
+  
+      return result;
+  
+    } catch (error) {
+      // Update progress on error
+      await this.updateProgress(params.userId, {
+        type: 'intent_error',
+        intent,
+        error: error.message,
+        message: `Error processing ${intent}: ${error.message}`
+      });
+  
+      throw error;
+    }
+  }
+
+  async processIntent(intent, params) {
+    try {
+      const network = await networkState.getCurrentNetwork(params.userId);
+      const { text, userId, context } = params;
 
       switch (intent) {
-
-        case TRADING_INTENTS.PRODUCT_SEARCH:
-          return this.handleShopifySearch(context.keyword || text);
-  
-        case TRADING_INTENTS.TOKEN_TRADE:
-          return this.handleTokenTrade(context);
-          
-        case TRADING_INTENTS.PRICE_ALERT:
-          return await this.handlePriceAlert(intent, userId, network);
-
-        case TRADING_INTENTS.TIMED_ORDER:
-          return await this.handleTimedOrder(intent, userId, network);
-
+        // Trading Actions
         case TRADING_INTENTS.QUICK_TRADE:
-          return await this.handleQuickTrade(intent, userId, network);
+        case TRADING_INTENTS.TOKEN_TRADE:
+          if (!intent.tokenAddress || !intent.amount) {
+            throw new Error('Missing required trade parameters');
+          }
+          return await this.swapTokens(params, network);
+          
+        case TRADING_INTENTS.COMPOUND_STRATEGY:
+            return await this.intentProcessHandler.handleCompoundStrategy(params);
 
-        case TRADING_INTENTS.GAS_ESTIMATE:
-          return await this.handleGasEstimate(data);
-
-        case TRADING_INTENTS.APPROVE_TOKEN:
-          return await this.handleTokenApproval(data);
-
-        case TRADING_INTENTS.REVOKE_APPROVAL:
-          return await tokenApprovalService.revokeApproval(network, data);
-
-        case TRADING_INTENTS.PRICE_CHECK:
-          return await this.handlePriceCheck(network, data.tokenAddress);
-
-        case TRADING_INTENTS.FLIPPER_CONFIG:
-          return await this.handleFlipperConfig(userId, data);
-
-        case TRADING_INTENTS.FLIPPER_STATUS:
-          return await flipperMode.getStatus();
-
-        case TRADING_INTENTS.SWAP_TOKEN:
-          return await walletService.executeTrade(network, {
-            action: 'swap',
-            tokenAddress: data.tokenAddress,
-            amount: data.amount,
-            userId
-          });
-
-        case TRADING_INTENTS.PORTFOLIO_VIEW:
-          return await walletService.getWallets(userId);d
-
-        case TRADING_INTENTS.TRENDING_CHECK:
-          return await dextools.fetchTrendingTokens(network);
-
+        // Token Analysis & Market Data  
         case TRADING_INTENTS.TOKEN_SCAN:
           return await dextools.formatTokenAnalysis(network, text);
 
-        case TRADING_INTENTS.MARKET_ANALYSIS:
-          return await dextools.getMarketOverview(network);
+        case TRADING_INTENTS.TRENDING_CHECK:
+          return await trendingService.getTrendingTokens(network);
 
-        case TRADING_INTENTS.KOL_CHECK:
-          return await twitterService.searchTweets(text);
+        case TRADING_INTENTS.MARKET_ANALYSIS:
+          return await trendingService.getMarketOverview(network);
 
         case TRADING_INTENTS.GEMS_TODAY:
           return await gemsService.scanGems();
 
-        case TRADING_INTENTS.INTERNET_SEARCH:
-          return await this.performInternetSearch(text);
+        // Social & KOL Analysis
+        case TRADING_INTENTS.KOL_CHECK:
+          return await twitterService.searchTweets(text);
         
+          case TRADING_INTENTS.KOL_MONITOR_SETUP:
+          return await this.flowManager.startFlow('kolMonitor', {
+            userId,
+            initialData: intent.parameters
+          });
+
+        // Automated Trading
+        case TRADING_INTENTS.FLIPPER_STATUS:
+          return await flipperMode.getStatus(userId);
+
+        case TRADING_INTENTS.FLIPPER_MODE:
+        return await flipperMode.start(userId, intent.walletAddress, intent.parameters);
+
+        case TRADING_INTENTS.FLIPPER_CONFIG:
+        return await flipperMode.updateConfig(userId, intent.parameters);
+
+        // Orders & Alerts
+        case TRADING_INTENTS.PRICE_ALERT:
+          return await this.createPriceAlert(params, network);
+
+        case TRADING_INTENTS.TIMED_ORDER:
+          return await this.createTimedOrder(params, network);
+        
+        case TRADING_INTENTS.MULTI_TARGET_ORDER:
+        return await this.flowManager.startFlow('multiTarget', {
+            userId,
+            initialData: intent.parameters
+        });
+
+        // Portfolio & Positions
+        case TRADING_INTENTS.PORTFOLIO_VIEW:
+          return await walletService.getWallets(userId);
+
+        case TRADING_INTENTS.POSITION_MANAGE:
+          return await flipperMode.getOpenPositions(userId);
+
+        case TRADING_INTENTS.TRADE_HISTORY:
+          return await walletService.getTradeHistory(userId);
+
+        // Token Operations
+        case TRADING_INTENTS.PRICE_CHECK:
+          return await dextools.getTokenPrice(network, params.tokenAddress);
+
+        case TRADING_INTENTS.APPROVE_TOKEN:
+          return await this.handleTokenApproval(params, network);
+
+        case TRADING_INTENTS.REVOKE_APPROVAL:
+          return await this.handleTokenRevocation(params, network);
+
+        // Solana Payments & Shopify Shopping
+        case TRADING_INTENTS.SOLANA_PAY:
+          return await this.createSolanaPayment(params);
+
         case TRADING_INTENTS.SHOPIFY_SEARCH:
           return await this.handleShopifySearch(text);
 
         case TRADING_INTENTS.SHOPIFY_BUY:
-          return await shopifyService.createOrder(text);
+          return await shopifyService.createOrder(params.productId);
 
-        case TRADING_INTENTS.SOLANA_PAY:
-          return await solanaPayService.createPayment(text);
-
+        // Butler Assistant
         case TRADING_INTENTS.BUTLER_REMINDER:
           return await butlerService.setReminder(userId, text);
 
@@ -132,6 +194,7 @@ export class IntentProcessor {
         case TRADING_INTENTS.BUTLER_REPORT:
           return await butlerService.generateReport(userId);
 
+        // AI Guidelines & Strategies
         case TRADING_INTENTS.SAVE_GUIDELINE:
           return await dbAIInterface.saveUserGuideline(userId, text);
 
@@ -139,29 +202,44 @@ export class IntentProcessor {
           return await dbAIInterface.getUserGuidelines(userId);
 
         case TRADING_INTENTS.SAVE_STRATEGY:
-          return await dbAIInterface.saveTradingStrategy(userId, text);
+          return await dbAIInterface.saveTradingStrategy(userId, { strategy: text });
 
         case TRADING_INTENTS.GET_STRATEGIES:
           return await dbAIInterface.getTradingStrategies(userId);
 
-        case TRADING_INTENTS.PORTFOLIO_VIEW:
-          return await walletService.getWallets(userId);
+        // Research & Analysis
+        case TRADING_INTENTS.INTERNET_SEARCH:
+          return await this.intentProcessHandler.performInternetSearch(text);
 
-        case TRADING_INTENTS.POSITION_MANAGE:
-          return await flipperMode.getOpenPositions();
+        // Context & History
+        case TRADING_INTENTS.CHAT_HISTORY:
+          return {
+            text: await contextManager.getContext(userId),
+            type: 'history'
+          };
 
-        case TRADING_INTENTS.ALERT_MONITOR:
-          return await priceAlertService.getActiveAlerts(userId);
+        case TRADING_INTENTS.CHAT_SUMMARY:
+          return {
+            text: await contextManager.getContextSummary(userId),
+            type: 'summary'
+          };
 
-        case TRADING_INTENTS.TRADE_HISTORY:
-          return await walletService.getTradeHistory(userId);
+        case TRADING_INTENTS.CONTEXT_RECALL:
+          return {
+            text: await contextManager.searchContext(userId, text),
+            type: 'search'
+          };
 
+        case TRADING_INTENTS.CONTEXT_REFERENCE:
+          return await this.handleContextReference(params);
+
+        // Chat & Conversation
         case TRADING_INTENTS.CHAT:
         case TRADING_INTENTS.GREETING:
-          return await this.handleConversation(text, userId, context);
+          return await this.intentProcessHandler.handleConversation(text, userId, context);
 
         default:
-          return await this.handleConversation(text, userId, context);
+          return await this.intentProcessHandler.handleConversation(text, userId, context);
       }
     } catch (error) {
       await ErrorHandler.handle(error);
@@ -169,163 +247,45 @@ export class IntentProcessor {
     }
   }
 
-  async handleConversation(text, userId, context) {
-    try {
-      const response = await openAIService.generateAIResponse(
-        this.buildChatPrompt(text, context),
-        'chat'
-      );
-
-      await this.contextManager.updateContext(userId, text, response);
-
-      return {
-        text: response,
-        type: 'chat',
-        requiresInput: false
-      };
-    } catch (error) {
-      await ErrorHandler.handle(error);
-      throw error;
-    }
-  }
-
-  async handleGreeting(text, userId) {
-    try {
-      const response = await openAIService.generateAIResponse(
-        this.buildChatPrompt(text, []),
-        'greeting'
-      );
-
-      await this.contextManager.updateContext(userId, text, response);
-
-      return {
-        text: response,
-        type: 'greeting',
-        requiresInput: false
-      };
-    } catch (error) {
-      await ErrorHandler.handle(error);
-      throw error;
-    }
-  }
-
-  
-async handleShopifySearch(query) {
-  try {
-    console.log('🔍 Processing shopping query:', query);
-
-    // Get intent analysis from AI
-    const analysis = await openAIService.generateAIResponse({
-      role: 'system',
-      content: systemPrompts.shopping,
-      messages: [{ role: 'user', content: query }]
-    });
-    
-    // Parse the analysis
-    const { keyword } = typeof analysis === 'string' ? 
-      JSON.parse(analysis) : analysis;
-
-    console.log('🎯 Extracted search keyword:', keyword);
-
-    if (!keyword) {
-      return {
-        text: "I couldn't determine what product you're looking for. Please specify what you'd like to shop for.",
-        type: 'error'
-      };
+  // Helper methods for intent execution
+  async swapTokens(params, network) {
+    if (!params.tokenAddress || !params.amount) {
+      throw new Error('Missing required trade parameters');
     }
 
-    // Search products with extracted keyword
-    const products = await shopifyService.searchProducts(keyword);
-    
-    if (!products?.length) {
-      return {
-        text: `Sorry, I couldn't find any products matching "${keyword}". Try a different search term.`,
-        type: 'search'
-      };
-    }
-
-    // Format rich product display
-    const message = `*KATZ Store Products* 🛍️\n\n${products.map((product, i) => 
-      `${i + 1}. *${product.title}*\n` +
-      `💰 Price: ${product.currency} ${parseFloat(product.price).toFixed(2)}\n` +
-      `${product.description ? `📝 ${product.description.slice(0, 100)}...\n` : ''}` +
-      `${product.available ? '✅ In Stock' : '❌ Out of Stock'}\n` +
-      `${product.image ? `🖼️ [View Image](${product.image})\n` : ''}\n`
-    ).join('\n')}` +
-    '\n_Click product images to view details_';
-
-    return {
-      text: message,
-      type: 'search',
-      products: products,
-      parse_mode: 'Markdown'
-    };
-
-  } catch (error) {
-    console.error('❌ Shopify search error:', error);
-    await ErrorHandler.handle(error);
-    return {
-      text: "Sorry, I encountered an error while searching for products. Please try again later.",
-      type: 'error'
-    };
-  }
-}
-
-  async handlePriceAlert(intent, userId, network) {
-    if (intent.multiTargets) {
-      return Promise.all(intent.multiTargets.map(target => 
-        priceAlertService.createAlert(userId, {
-          tokenAddress: intent.token,
-          network,
-          targetPrice: target.price,
-          condition: 'above',
-          swapAction: {
-            enabled: true,
-            type: 'sell',
-            amount: `${target.percentage}%`
-          }
-        })
-      ));
-    }
-
-    return priceAlertService.createAlert(userId, {
-      tokenAddress: intent.token,
+    return await tradeService.executeTrade({
       network,
-      targetPrice: intent.targetPrice,
-      condition: intent.action === 'buy' ? 'below' : 'above',
-      swapAction: {
-        enabled: !!intent.amount,
-        type: intent.action,
-        amount: intent.amount
-      }
+      userId: params.userId,
+      action: params.action,
+      tokenAddress: params.tokenAddress,
+      amount: params.amount,
+      options: params.options
     });
   }
 
-  async handleTimedOrder(intent, userId, network) {
-    return timedOrderService.createOrder(userId, {
-      tokenAddress: intent.token,
+  async createPriceAlert(params, network) {
+    return await priceAlertService.createAlert(params.userId, {
+      tokenAddress: params.tokenAddress,
+      targetPrice: params.targetPrice,
+      condition: params.condition,
       network,
-      action: intent.action,
-      amount: intent.amount,
-      executeAt: new Date(intent.timing)
+      walletAddress: params.walletAddress,
+      swapAction: params.swapAction
     });
   }
 
-  async handleQuickTrade(intent, userId, network) {
-    return walletService.executeTrade(network, {
-      action: intent.action,
-      tokenAddress: intent.token,
-      amount: intent.amount,
-      userId
+  async createTimedOrder(params, network) {
+    return await timedOrderService.createOrder(params.userId, {
+      tokenAddress: params.tokenAddress,
+      action: params.action,
+      amount: params.amount,
+      executeAt: params.timing,
+      network
     });
   }
 
-  async handleGasEstimate(params) {
-    return gasEstimationService.estimateGas(params.network, params.transaction);
-  }
-
-  async handleTokenApproval(params) {
-    return tokenApprovalService.approveToken(params.network, {
+  async handleTokenApproval(params, network) {
+    return await tokenApprovalService.approveToken(network, {
       tokenAddress: params.tokenAddress,
       spenderAddress: params.spenderAddress,
       amount: params.amount,
@@ -333,87 +293,112 @@ async handleShopifySearch(query) {
     });
   }
 
-  async handleFlipperConfig(userId, config) {
-    return flipperMode.start(userId, config.walletAddress, config);
+  async handleTokenRevocation(params, network) {
+    return await tokenApprovalService.revokeApproval(network, {
+      tokenAddress: params.tokenAddress,
+      spenderAddress: params.spenderAddress,
+      walletAddress: params.walletAddress
+    });
   }
 
-  async handlePriceCheck(network, tokenAddress) {
-    return dextools.getTokenPrice(network, tokenAddress);
+  async createSolanaPayment(params) {
+    return await solanaPayService.createPayment({
+      amount: params.amount,
+      recipient: params.recipient,
+      reference: params.reference,
+      label: params.label
+    });
   }
 
-  buildChatPrompt(text, context) {
-    const contextMessages = context.map(msg => ({
-      role: msg.role,
-      content: msg.content
+  async handleShopifySearch(text) {
+    const products = await shopifyService.searchProducts(text);
+    if (!products?.length) {
+      return {
+        text: "No products found matching your search.",
+        type: 'search'
+      };
+    }
+
+    return products.length === 1 
+      ? this.formatSingleProduct(products[0])
+      : this.formatShopifyResults(products);
+  }
+
+  async handleContextReference(params) {
+    const reference = await contextManager.resolveReference(params.userId, params.text);
+    if (!reference) {
+      return {
+        text: "I couldn't find what you're referring to. Could you be more specific?",
+        type: 'error'
+      };
+    }
+
+    if (reference.type === 'product') {
+      return await this.handleProductReference(params.userId, reference.identifier);
+    }
+
+    return await intentProcessHandler.handleConversation(
+      params.text, 
+      params.userId, 
+      `context: ${params.context} reference: ${reference.data}`
+    );
+  }
+
+  formatSingleProduct(product) {
+    return {
+      text: [
+        `*${product.title}* 🛍️\n`,
+        product.description ? `${product.description}\n` : '',
+        `💰 ${product.currency} ${parseFloat(product.price).toFixed(2)}`,
+        `${product.available ? '✅ In Stock' : '❌ Out of Stock'}`,
+        `\n🔗 [View Product](${product.url})`,
+        `\nReference: \`product_${product.id}\``
+      ].filter(Boolean).join('\n'),
+      type: 'single_product',
+      parse_mode: 'Markdown',
+      product: {
+        ...product,
+        reference: `product_${product.id}`
+      }
+    };
+  }
+
+  formatShopifyResults(products) {
+    const formattedProducts = products.map(product => ({
+      ...product,
+      reference: `product_${product.id}`
     }));
 
-    return [
-      {
-        role: 'system',
-        content: `You are KATZ, a sarcastic AI trading assistant from Courage the Cowardly Dog. 
-                 You help users with crypto trading while maintaining your witty personality.
-                 Always end responses with a sarcastic warning about getting rekt.
-                 When you cant do some external services tasks its because you still need more access to do function calling.
-                 You are still in development, but currently capable of:
-                 - Automated buying and selling of tokens on Solana, Base and Ethereum.
-                 - Detect pumpfun, moonshot launches
-                 - Setting orders and price alerts with actions and conditions.
-                 - Scanning and analyzing gems by combining external services
-                 - Referencing any tweeter user as source in analysis
-                 - Doing quick flips with new tokens on pumpfun using custom criteria trained by user in training.
-                 - Handle crypto payments automatically using SolanaPay.
-                 - Handle online shopping using Shopify
-                 - Track users Fav KOLs and trade tokens they tweet automatically.
-                 - Access Google services and use them on behalf of user, send emails, set events etc.
-                 - Operate on 3 types of inputs: Bot commands, Natural text, Natural voice prompts.
-                 - You are an openAI LLM based autonomous agent, with a Mongo Atlas DB & Brave search engine dependency.
-                 - You can fire any function or command for users if they give the right prompt via voice.
-                 `
-      },
-      ...contextMessages,
-      {
-        role: 'user',
-        content: text
-      }
-    ];
+    return {
+      text: [
+        '*KATZ Store Products* 🛍️\n',
+        ...formattedProducts.map((product, i) => [
+          `${i + 1}. *${product.title}*`,
+          `💰 ${product.currency} ${parseFloat(product.price).toFixed(2)}`,
+          product.description ? `${product.description.slice(0, 100)}...` : '',
+          `${product.available ? '✅ In Stock' : '❌ Out of Stock'}`,
+          `🔗 [View Product](${product.url})`,
+          `Reference: \`${product.reference}\`\n`
+        ].filter(Boolean).join('\n')).join('\n')
+      ].join('\n'),
+      type: 'product_list',
+      parse_mode: 'Markdown',
+      products: formattedProducts
+    };
   }
 
-  async performInternetSearch(query) {
-    try {
-      // Search using Brave API
-      const response = await axios.get('https://api.search.brave.com/res/v1/web/search', {
-        headers: {
-          'X-Subscription-Token': config.braveApiKey,
-        },
-        params: {
-          q: query,
-          format: 'json',
-          count: 5
-        },
-      });
-
-      // Extract relevant information
-      const results = response.data.results.map(result => ({
-        title: result.title,
-        description: result.description,
-        url: result.url
-      }));
-
-      // Generate AI summary
-      const summary = await openAIService.generateAIResponse(
-        `Summarize this information about ${query}: ${JSON.stringify(results)}`,
-        'search_summary'
-      );
-
-      return {
-        summary,
-        results,
-        query
-      };
-    } catch (error) {
-      await ErrorHandler.handle(error);
-      throw error;
+  async handleProductReference(userId, productId) {
+    const product = await shopifyService.getProductById(productId);
+    if (!product) {
+      throw new Error('Product not found');
     }
+    return this.formatSingleProduct(product);
   }
-  
+
+  cleanup() {
+    this.removeAllListeners();
+    this.initialized = false;
+  }
 }
+
+export const intentProcessor = new IntentProcessor();

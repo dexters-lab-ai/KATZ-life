@@ -67,7 +67,7 @@ class OpenAIService {
       if (!messages.some(msg => msg.role === 'system')) {
         messages.unshift({
           role: 'system',
-          content: systemPrompts[purpose] || systemPrompts.general
+          content: systemPrompts[purpose] || systemPrompts.chat
         });
       }
       return messages;
@@ -89,7 +89,7 @@ class OpenAIService {
       // Add system prompt
       formattedMessages.unshift({
         role: 'system',
-        content: systemPrompts[purpose] || systemPrompts.general
+        content: systemPrompts[purpose] || systemPrompts.chat
       });
   
       return formattedMessages;
@@ -100,7 +100,7 @@ class OpenAIService {
       return [
         {
           role: 'system',
-          content: systemPrompts[purpose] || systemPrompts.general
+          content: systemPrompts[purpose] || systemPrompts.chat
         },
         {
           role: 'user',
@@ -114,7 +114,7 @@ class OpenAIService {
       return [
         {
           role: 'system',
-          content: systemPrompts[purpose] || systemPrompts.general
+          content: systemPrompts[purpose] || systemPrompts.chat
         },
         {
           role: messages.role || 'user',
